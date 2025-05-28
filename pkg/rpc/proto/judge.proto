@@ -1,4 +1,4 @@
-syntax="proto3";
+syntax = "proto3";
 
 package rpc;
 
@@ -26,23 +26,73 @@ enum Language {
 
 message JudgeResponse {
   repeated Result results = 1;
+  // 整体统计信息
+  OverallStatistics overall = 2;
+}
+
+message OverallStatistics {
+  uint32 total_testcases = 1;            // 总测试用例数
+  uint32 total_correct = 2;              // 通过的测试用例数
+  string compare_result = 3;             // 测试用例通过情况位串 "1110101"
+  
+  // 时间统计
+  int64 total_time = 4;                  // 总执行时间（毫秒）
+  int64 max_time = 5;                    // 最大单个测试用例时间
+  int64 avg_time = 6;                    // 平均执行时间
+  
+  // 内存统计  
+  int64 total_memory = 7;                // 总内存使用（字节）
+  int64 max_memory = 8;                  // 最大单个测试用例内存
+  int64 avg_memory = 9;                  // 平均内存使用
+  
+  // 整体状态
+  Status final_status = 10;              // 最终判题状态
+  string submission_id = 11;             // 提交ID
+  uint64 task_finish_time = 12;          // 任务完成时间戳
+  bool finished = 13;                    // 是否完成
+  
+  // 性能排名（可选，需要历史数据支持）
+  uint32 overall_runtime_percentile = 14; // 整体运行时间百分位
+  uint32 overall_memory_percentile = 15;  // 整体内存百分位
 }
 
 message Result {
   Status status = 1;
-  int64 TimeUsed = 2;
-  int64 MemoryUsed  = 3; //in bytes
-  string output = 4;
-  string expected_output = 5;
+  int64 TimeUsed = 2;                    // 时间使用（毫秒）
+  int64 MemoryUsed = 3;                  // 内存使用（字节）
+  string output = 4;                     // 实际输出
+  string expected_output = 5;            // 期望输出
+  
+  // 显示格式化信息
+  string status_runtime = 6;             // 格式化运行时间 "150 ms"
+  string status_memory = 7;              // 格式化内存使用 "2.1 MB"
+  string status_msg = 8;                 // 状态消息 "Accepted", "Wrong Answer"
+  
+  // 性能比较
+  uint32 runtime_percentile = 9;         // 运行时间百分位 (0-100)
+  uint32 memory_percentile = 10;         // 内存百分位 (0-100)
+  
+  // 错误信息
+  string error_message = 11;             // 详细错误信息
+  string compile_error = 12;             // 编译错误详情
+  int32 exit_code = 13;                  // 程序退出码
+  
+  // 测试用例信息
+  string testcase_input = 14;            // 当前测试用例输入
+  bool is_last_testcase = 15;            // 是否是最后一个测试用例
+  
+  // 执行详情
+  int64 compile_time = 16;               // 编译时间（毫秒）
+  string execution_id = 17;              // 执行ID，用于调试
 }
 
 enum Status {
-    status_accepted = 0;
-    status_wrong_answer = 1;
-    status_time_limit_exceeded = 2;
-    status_memory_limit_exceeded = 3;
-    status_runtime_error = 4;
-    status_compilation_error = 5;
+  status_accepted = 0;
+  status_wrong_answer = 1;
+  status_time_limit_exceeded = 2;
+  status_memory_limit_exceeded = 3;
+  status_runtime_error = 4;
+  status_compilation_error = 5;
 }
 
 service JudgeService {
