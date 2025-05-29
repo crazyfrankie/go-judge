@@ -6,31 +6,28 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"html/template"
 	"math"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"github.com/crazyfrankie/go-judge/pkg/rpc"
 	"github.com/crazyfrankie/go-judge/pkg/types"
 )
 
-type GoRunner struct {
-	rpc.UnimplementedRunnerServiceServer
-}
+type GoRunner struct{}
 
 func (g *GoRunner) Run(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeResponse, error) {
 	cmd := exec.Command("whoami")
 	user, _ := cmd.CombinedOutput()
 
-	// 构建基础工作目录
+	// build base dir
 	baseDir := fmt.Sprintf("%s/%d/%d", fmt.Sprintf(types.WorkDir, strings.TrimSpace(string(user))), req.GetProblemId(), req.GetUid())
 
-	// 解析限制条件
 	limit := &types.Limit{}
 	if req.GetMaxTime() != "" {
 		if timeLimit, err := strconv.Atoi(req.GetMaxTime()); err == nil {
@@ -43,25 +40,23 @@ func (g *GoRunner) Run(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeRe
 		}
 	}
 
-	// 并行处理所有测试用例
 	var wg sync.WaitGroup
 	results := make([]*rpc.Result, len(req.GetInput()))
 
 	for i, input := range req.GetInput() {
 		wg.Add(1)
-		go func() {
+		go func(index int, testInput string) {
 			defer wg.Done()
 
-			testWorkDir := fmt.Sprintf("%s/test_%d", baseDir, i)
+			testWorkDir := fmt.Sprintf("%s/test_%d", baseDir, index)
 
 			expectedOutput := ""
-			if i < len(req.GetOutput()) {
-				expectedOutput = req.GetOutput()[i]
+			if index < len(req.GetOutput()) {
+				expectedOutput = req.GetOutput()[index]
 			}
 
-			// 执行测试用例
 			testResult, err := judgeTestCase(ctx, req.GetFullTemplate(), req.GetCode(),
-				req.GetTypeDefinition(), input, expectedOutput, limit, testWorkDir)
+				req.GetTypeDefinition(), testInput, expectedOutput, limit, testWorkDir)
 
 			result := &rpc.Result{
 				TimeUsed:       testResult.TimeUsed,
@@ -69,23 +64,19 @@ func (g *GoRunner) Run(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeRe
 				Output:         testResult.Output,
 				ExpectedOutput: testResult.ExpectedOutput,
 
-				// 格式化显示信息
+				// formate status info
 				StatusRuntime: formatRuntime(testResult.TimeUsed),
 				StatusMemory:  formatMemory(testResult.MemoryUsed),
 				StatusMsg:     getStatusMessage(testResult.Status),
 
-				// 性能百分位
 				RuntimePercentile: calculatePercentile(testResult.TimeUsed, false),
-				MemoryPercentile:  calculatePercentile(testResult.MemoryUsed, true),
-
-				// 错误信息
-				ErrorMessage:   testResult.ErrorMessage,
-				TestcaseInput:  input,
-				IsLastTestcase: i == len(req.GetInput())-1,
-				ExecutionId:    fmt.Sprintf("%d_%d_%d", req.GetProblemId(), req.GetUid(), i),
+				MemoryPercentile:  calculatePercentile(testResult.MemoryUsed, true), // 错误信息
+				ErrorMessage:      testResult.ErrorMessage,
+				TestcaseInput:     testInput,
+				IsLastTestcase:    index == len(req.GetInput())-1,
+				ExecutionId:       fmt.Sprintf("%d_%d_%d", req.GetProblemId(), req.GetUid(), index),
 			}
 
-			// 如果有执行结果详情，添加退出码
 			if testResult.ExecutionResult != nil {
 				result.ExitCode = int32(testResult.ExecutionResult.ExitCode)
 				if testResult.ExecutionResult.ErrorOutput != "" {
@@ -115,8 +106,8 @@ func (g *GoRunner) Run(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeRe
 				result.Output = fmt.Sprintf("Internal error: %v", err)
 			}
 
-			results[i] = result
-		}()
+			results[index] = result
+		}(i, input)
 	}
 
 	wg.Wait()
@@ -134,47 +125,36 @@ func judgeTestCase(ctx context.Context, fullTemp string, userCode string, typesD
 		ExpectedOutput: expectedOutput,
 	}
 
-	// 确保工作目录存在
+	// make sure dir is existed
 	if err := os.MkdirAll(workdir, 0755); err != nil {
 		result.Status = types.StatusRuntimeError
 		result.ErrorMessage = fmt.Sprintf("Failed to create workdir: %v", err)
 		return result, nil
 	}
 
-	// 生成代码文件
-	codeFile, err := parseTemplate(fullTemp, userCode, typesDef, input)
+	// parse code template
+	err := parseTemplate(fullTemp, userCode, typesDef, input, workdir)
 	if err != nil {
 		result.Status = types.StatusCompilationError
 		result.ErrorMessage = fmt.Sprintf("Template parse error: %v", err)
 		return result, nil
 	}
-	defer os.Remove(codeFile)
 
-	// 复制代码文件到工作目录
-	mainGoPath := fmt.Sprintf("%s/main.go", workdir)
-	if err := copyFile(codeFile, mainGoPath); err != nil {
-		result.Status = types.StatusRuntimeError
-		result.ErrorMessage = fmt.Sprintf("Failed to copy code file: %v", err)
-		return result, nil
-	}
-
-	// 生成运行脚本
-	shFile, err := buildShell(workdir, "main.go")
+	// generate run shell
+	err = buildShell(workdir)
 	if err != nil {
 		result.Status = types.StatusRuntimeError
 		result.ErrorMessage = fmt.Sprintf("Failed to create shell script: %v", err)
 		return result, nil
 	}
-	defer os.Remove(shFile)
 
-	// 在 Docker 容器中运行
+	// run in docker container
 	err = runDocker(ctx, limit, workdir)
 	if err != nil {
 		result.Status = types.StatusRuntimeError
 		result.ErrorMessage = fmt.Sprintf("Docker execution error: %v", err)
 		return result, nil
 	}
-
 	// 解析执行结果
 	execResult, err := parseStatsFile(workdir)
 	if err != nil {
@@ -182,7 +162,9 @@ func judgeTestCase(ctx context.Context, fullTemp string, userCode string, typesD
 		result.ErrorMessage = fmt.Sprintf("Failed to parse execution result: %v", err)
 		return result, nil
 	}
-
+	defer func() {
+		os.RemoveAll(workdir)
+	}()
 	result.ExecutionResult = execResult
 	result.TimeUsed = execResult.TimeUsed
 	result.MemoryUsed = execResult.MemoryUsed
@@ -372,27 +354,8 @@ func calculateOverallStatistics(results []*rpc.Result, req *rpc.JudgeRequest) *r
 	return stats
 }
 
-func copyFile(src, dst string) error {
-	sourceFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer sourceFile.Close()
-
-	destFile, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer destFile.Close()
-
-	_, err = destFile.ReadFrom(sourceFile)
-	return err
-}
-
-func parseTemplate(fullTemp string, userCode string, types string, input string) (string, error) {
-	tpl, _ := template.New("main").Funcs(template.FuncMap{
-		"safe": func(s string) template.HTML { return template.HTML(s) },
-	}).Parse(fullTemp)
+func parseTemplate(fullTemp string, userCode string, types string, input string, workdir string) error {
+	tpl, _ := template.New("main").Parse(fullTemp)
 
 	tmp, _ := os.CreateTemp(os.TempDir(), "main_*.go")
 	defer os.Remove(tmp.Name())
@@ -400,11 +363,11 @@ func parseTemplate(fullTemp string, userCode string, types string, input string)
 	err := tpl.Execute(tmp, map[string]string{
 		"TYPES":     types,
 		"USER_CODE": userCode,
-		"TEST_CODE": input,
+		"INPUT":     input,
 		"IMPORTS":   "",
 	})
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	content, _ := os.ReadFile(tmp.Name())
@@ -415,21 +378,20 @@ func parseTemplate(fullTemp string, userCode string, types string, input string)
 		final = "\n\nimport (\n" + strings.Join(imports, "\n") + "\n)\n"
 	}
 
-	newTpl, _ := template.New("main").Funcs(template.FuncMap{
-		"safe": func(s string) template.HTML { return template.HTML(s) },
-	}).Parse(fullTemp)
-	codeFile, _ := os.CreateTemp(os.TempDir(), "main_*.go")
+	newTpl, _ := template.New("main").Parse(fullTemp)
+	codeFile, _ := os.OpenFile(fmt.Sprintf("%s/main.go", workdir), os.O_CREATE|os.O_RDWR, 0644)
 	err = newTpl.Execute(codeFile, map[string]string{
 		"USER_CODE": userCode,
-		"TEST_CODE": input,
+		"INPUT":     input,
 		"TYPES":     types,
 		"IMPORTS":   final,
 	})
+	defer codeFile.Close()
 	if err != nil {
-		return "", err
+		return err
 	}
 
-	return codeFile.Name(), nil
+	return nil
 }
 
 func detectImports(code string) []string {
@@ -462,22 +424,26 @@ func detectImports(code string) []string {
 	return imports
 }
 
-func buildShell(workdir, path string) (string, error) {
+func buildShell(workdir string) error {
 	sh, err := os.OpenFile(fmt.Sprintf("%s/run.sh", workdir), os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
-		return "", err
+		return err
 	}
-	res := fmt.Sprintf(types.GoShell, path, path)
-	_, err = sh.WriteString(res)
+	defer sh.Close()
+	res := fmt.Sprintf(types.GoShell, "main.go", "main.go")
+	if _, err = sh.WriteString(res); err != nil {
+		return err
+	}
 
-	return sh.Name(), err
+	cmd := exec.Command("chmod", "+x", sh.Name())
+	return cmd.Run()
 }
 
 func runDocker(ctx context.Context, limit *types.Limit, workdir string) error {
 	args := buildDockerArgs(limit)
 	defaultArgs := []string{"run", "--rm", "-v", fmt.Sprintf("%s:/app", workdir)}
 
-	args = append(args, defaultArgs...)
+	args = append(defaultArgs, args...)
 	args = append(args, types.GoImage)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -488,29 +454,34 @@ func runDocker(ctx context.Context, limit *types.Limit, workdir string) error {
 }
 
 func buildDockerArgs(limit *types.Limit) []string {
-	args := make([]string, 0, 5)
+	args := make([]string, 0, 8)
 
-	//  MB -> m
-	memStr := fmt.Sprintf("%dm", limit.MemoryLimit)
+	// Memory limitations - user program limitations + Go compiler and runtime overheads
+	// Go compiler and runtime require an additional 128MB of memory
+	memLimit := limit.MemoryLimit + 128
+	memStr := fmt.Sprintf("%dm", memLimit)
 	args = append(args, "--memory="+memStr)
 
-	// address space limit (byte)
-	asLimit := limit.MemoryLimit * 1024 * 1024
-	args = append(args, "--ulimit", fmt.Sprintf("as=%d", asLimit))
+	// Limit the number of processes - the Go compiler requires a lot of sub-processes, so there's a good limit.
+	args = append(args, "--pids-limit=200")
 
-	args = append(args, "--pids-limit=1")
+	// CPU time limit (seconds) - user program time + compilation time
+	// Give an extra 20 seconds to the Go compilation process
+	cpuSeconds := int(math.Ceil(float64(limit.TimeLimit)/1000)) + 20
+	args = append(args, "--ulimit", fmt.Sprintf("cpu=%d:%d", cpuSeconds, cpuSeconds))
 
-	// cpu time limit (s)
-	cpuSeconds := int(math.Ceil(float64(limit.TimeLimit) / 1000))
-	args = append(args, "--ulimit", fmt.Sprintf("cpu=%d", cpuSeconds))
+	// File descriptor limitations - compiling requires opening many files
+	args = append(args, "--ulimit", "nofile=2048:2048")
 
-	// Estimated number of CPU cores available (rough), e.g. 1 sec / 2 sec = 0.5 cores
-	// optional： Trying to get tighter control of the CPU
-	//if cpuSeconds > 0 {
-	//	cpuQuota := cpuSeconds * 100000 // 100ms = 100000 us
-	//	args = append(args, "--cpu-period=100000", fmt.Sprintf("--cpu-quota=%d", cpuQuota))
-	//	args = append(args, fmt.Sprintf("--cpus=%.2f", float64(limit.TimeLimit)/2000.0))
-	//}
+	// Temporary file system, allowing execution and writing
+	args = append(args, "--tmpfs", "/tmp:exec,size=300m")
+
+	// Network isolation
+	args = append(args, "--network=none")
+
+	// Security Options
+	args = append(args, "--security-opt=no-new-privileges")
+	args = append(args, "--cap-drop=ALL")
 
 	return args
 }
@@ -535,21 +506,24 @@ func parseStatsFile(workdir string) (*types.ExecutionResult, error) {
 		}
 	}
 
-	// 解析时间使用（毫秒）
-	if userTime, exists := stats["User time (seconds)"]; exists {
+	if elapsedTime, exists := stats["Elapsed (wall clock) time (h:mm:ss or m:ss)"]; exists {
+		if seconds := parseElapsedTime(elapsedTime); seconds > 0 {
+			result.TimeUsed = int64(seconds * 1000)
+		}
+	} else if userTime, exists := stats["User time (seconds)"]; exists {
 		if seconds, err := strconv.ParseFloat(userTime, 64); err == nil {
-			result.TimeUsed = int64(seconds * 1000) // 转换为毫秒
+			result.TimeUsed = int64(seconds * 1000)
 		}
 	}
 
-	// 解析内存使用（字节）
+	// Parse memory usage (bytes)
 	if maxMem, exists := stats["Maximum resident set size (kbytes)"]; exists {
 		if kb, err := strconv.ParseInt(maxMem, 10, 64); err == nil {
-			result.MemoryUsed = kb * 1024 // 转换为字节
+			result.MemoryUsed = kb * 1024
 		}
 	}
 
-	// 读取退出码
+	// Read exit code
 	exitCodePath := fmt.Sprintf("%s/exitcode.txt", workdir)
 	if exitCodeData, err := os.ReadFile(exitCodePath); err == nil {
 		if exitCode, err := strconv.Atoi(strings.TrimSpace(string(exitCodeData))); err == nil {
@@ -557,13 +531,13 @@ func parseStatsFile(workdir string) (*types.ExecutionResult, error) {
 		}
 	}
 
-	// 读取程序输出
+	// Read program output
 	resultPath := fmt.Sprintf("%s/result.txt", workdir)
 	if resultData, err := os.ReadFile(resultPath); err == nil {
 		result.Output = strings.TrimSpace(string(resultData))
 	}
 
-	// 读取错误输出
+	// Read error output
 	errorPath := fmt.Sprintf("%s/error.txt", workdir)
 	if errorData, err := os.ReadFile(errorPath); err == nil {
 		result.ErrorOutput = strings.TrimSpace(string(errorData))
@@ -639,4 +613,61 @@ func calculatePercentile(value int64, isMemory bool) uint32 {
 		}
 		return 20
 	}
+}
+
+// parseElapsedTime Parse elapsed time as "0m 2.57s" or "1:23:45".
+func parseElapsedTime(timeStr string) float64 {
+	timeStr = strings.TrimSpace(timeStr)
+
+	if strings.Contains(timeStr, "m") && strings.Contains(timeStr, "s") {
+		parts := strings.Fields(timeStr)
+		var totalSeconds float64
+
+		for _, part := range parts {
+			if strings.HasSuffix(part, "m") {
+				if minutes, err := strconv.ParseFloat(strings.TrimSuffix(part, "m"), 64); err == nil {
+					totalSeconds += minutes * 60
+				}
+			} else if strings.HasSuffix(part, "s") {
+				if seconds, err := strconv.ParseFloat(strings.TrimSuffix(part, "s"), 64); err == nil {
+					totalSeconds += seconds
+				}
+			}
+		}
+		return totalSeconds
+	}
+
+	// Processing the "1:23:45" format
+	if strings.Contains(timeStr, ":") {
+		parts := strings.Split(timeStr, ":")
+		var totalSeconds float64
+
+		switch len(parts) {
+		case 2: // mm:ss
+			if minutes, err := strconv.ParseFloat(parts[0], 64); err == nil {
+				totalSeconds += minutes * 60
+			}
+			if seconds, err := strconv.ParseFloat(parts[1], 64); err == nil {
+				totalSeconds += seconds
+			}
+		case 3: // hh:mm:ss
+			if hours, err := strconv.ParseFloat(parts[0], 64); err == nil {
+				totalSeconds += hours * 3600
+			}
+			if minutes, err := strconv.ParseFloat(parts[1], 64); err == nil {
+				totalSeconds += minutes * 60
+			}
+			if seconds, err := strconv.ParseFloat(parts[2], 64); err == nil {
+				totalSeconds += seconds
+			}
+		}
+		return totalSeconds
+	}
+
+	// Direct parse seconds
+	if seconds, err := strconv.ParseFloat(timeStr, 64); err == nil {
+		return seconds
+	}
+
+	return 0
 }

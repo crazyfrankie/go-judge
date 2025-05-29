@@ -9,24 +9,33 @@ const (
 set -e
 cd /app
 
-# 清理之前的结果文件
-rm -f result.txt error.txt stats.txt exitcode.txt
+# [1/5] 清理之前的结果文件
+rm -f result.txt error.txt stats.txt exitcode.txt compile.txt
 
-# 尝试编译检查语法
-if ! go fmt %s > error.txt 2>&1; then
+# [2/5] 编译检查和格式化
+echo "Compiling..." > /tmp/compile.log
+if ! go fmt %s > compile.txt 2>&1; then
     echo "1" > exitcode.txt
+    cat compile.txt > error.txt
     echo "Format error" >> error.txt
     exit 1
 fi
 
-# 运行程序并收集统计信息
-/usr/bin/time -v -o stats.txt timeout 30s go run %s > result.txt 2> error.txt
+# [3/5] 编译程序（不运行）
+if ! go build -o /tmp/program %s > compile.txt 2>&1; then
+    echo "1" > exitcode.txt
+    cat compile.txt > error.txt
+    echo "Compilation error" >> error.txt
+    exit 1
+fi
+
+# [4/5] 运行编译好的程序并测量时间
+echo "Running..." > /tmp/run.log
+/usr/bin/time -v -o stats.txt timeout 30s /tmp/program > result.txt 2> error.txt
 echo $? > exitcode.txt
 
-# 如果有编译错误，确保记录
-if [ -s error.txt ] && [ ! -s result.txt ]; then
-    echo "1" > exitcode.txt
-fi
+# [5/5] 清理临时文件
+rm -f /tmp/program compile.txt
 `
 	GoImage = "oj/go-runner:1.24"
 )

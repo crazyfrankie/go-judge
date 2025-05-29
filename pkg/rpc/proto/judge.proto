@@ -26,6 +26,7 @@ enum Language {
 
 message JudgeResponse {
   repeated Result results = 1;
+  
   // 整体统计信息
   OverallStatistics overall = 2;
 }
@@ -56,6 +57,63 @@ message OverallStatistics {
   uint32 overall_memory_percentile = 15;  // 整体内存百分位
 }
 
+//{
+// "status_code": 10,
+// "lang": "golang",
+// "run_success": true,
+// "status_runtime": "0 ms",
+// "memory": 5852000,
+// "display_runtime": "0",
+// "question_id": "1",
+// "elapsed_time": 15,
+// "compare_result": "111111111111111111111111111111111111111111111111111111111111111",
+// "code_output": "",
+// "std_output": "",
+// "last_testcase": "",
+// "expected_output": "",
+// "task_finish_time": 1748442140225,
+// "task_name": "judger.judgetask.Judge",
+// "finished": true,
+// "status_msg": "Accepted",
+// "state": "SUCCESS",
+// "fast_submit": false,
+// "total_correct": 63,
+// "total_testcases": 63,
+// "submission_id": "633122558",
+// "runtime_percentile": 100,
+// "status_memory": "5.7 MB",
+// "memory_percentile": 46.121299999999906,
+// "pretty_lang": "Go"
+//}
+message PastedObject {
+  uint32 status_code = 1;
+  string lang = 2;
+  bool run_success = 3;
+  string status_runtime = 4;
+  uint32 memory = 5;
+  string display_runtime = 6;
+  string question_id = 7;
+  uint32 elapsed_time = 8;
+  string compare_result = 9;
+  string code_output = 10;
+  string std_output = 11;
+  string last_testcase = 12;
+  string expected_output = 13;
+  uint32 task_finish_time = 14;
+  string task_name = 15;
+  bool finished = 16;
+  string status_msg = 17;
+  string state = 18;
+  bool fast_submit = 19;
+  uint32 total_correct = 20;
+  uint32 total_testcases = 21;
+  string submission_id = 22;
+  uint32 runtime_percentile = 23;
+  string status_memory = 24;
+  uint32 memory_percentile = 25;
+  string pretty_lang = 26;
+}
+
 message Result {
   Status status = 1;
   int64 TimeUsed = 2;                    // 时间使用（毫秒）
@@ -63,25 +121,25 @@ message Result {
   string output = 4;                     // 实际输出
   string expected_output = 5;            // 期望输出
   
-  // 显示格式化信息
+  // 扩展字段 - 显示格式化信息
   string status_runtime = 6;             // 格式化运行时间 "150 ms"
   string status_memory = 7;              // 格式化内存使用 "2.1 MB"
   string status_msg = 8;                 // 状态消息 "Accepted", "Wrong Answer"
   
-  // 性能比较
+  // 扩展字段 - 性能比较
   uint32 runtime_percentile = 9;         // 运行时间百分位 (0-100)
   uint32 memory_percentile = 10;         // 内存百分位 (0-100)
   
-  // 错误信息
+  // 扩展字段 - 错误信息
   string error_message = 11;             // 详细错误信息
   string compile_error = 12;             // 编译错误详情
   int32 exit_code = 13;                  // 程序退出码
   
-  // 测试用例信息
+  // 扩展字段 - 测试用例信息
   string testcase_input = 14;            // 当前测试用例输入
   bool is_last_testcase = 15;            // 是否是最后一个测试用例
   
-  // 执行详情
+  // 扩展字段 - 执行详情
   int64 compile_time = 16;               // 编译时间（毫秒）
   string execution_id = 17;              // 执行ID，用于调试
 }

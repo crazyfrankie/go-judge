@@ -714,9 +714,7 @@ const file_pkg_rpc_proto_judge_proto_rawDesc = "" +
 	"\x14status_runtime_error\x10\x04\x12\x1c\n" +
 	"\x18status_compilation_error\x10\x052>\n" +
 	"\fJudgeService\x12.\n" +
-	"\x05Judge\x12\x11.rpc.JudgeRequest\x1a\x12.rpc.JudgeResponse2=\n" +
-	"\rRunnerService\x12,\n" +
-	"\x03Run\x12\x11.rpc.JudgeRequest\x1a\x12.rpc.JudgeResponseB\x06Z\x04/rpcb\x06proto3"
+	"\x05Judge\x12\x11.rpc.JudgeRequest\x1a\x12.rpc.JudgeResponseB\x06Z\x04/rpcb\x06proto3"
 
 var (
 	file_pkg_rpc_proto_judge_proto_rawDescOnce sync.Once
@@ -747,11 +745,9 @@ var file_pkg_rpc_proto_judge_proto_depIdxs = []int32{
 	1, // 3: rpc.OverallStatistics.final_status:type_name -> rpc.Status
 	1, // 4: rpc.Result.status:type_name -> rpc.Status
 	2, // 5: rpc.JudgeService.Judge:input_type -> rpc.JudgeRequest
-	2, // 6: rpc.RunnerService.Run:input_type -> rpc.JudgeRequest
-	3, // 7: rpc.JudgeService.Judge:output_type -> rpc.JudgeResponse
-	3, // 8: rpc.RunnerService.Run:output_type -> rpc.JudgeResponse
-	7, // [7:9] is the sub-list for method output_type
-	5, // [5:7] is the sub-list for method input_type
+	3, // 6: rpc.JudgeService.Judge:output_type -> rpc.JudgeResponse
+	6, // [6:7] is the sub-list for method output_type
+	5, // [5:6] is the sub-list for method input_type
 	5, // [5:5] is the sub-list for extension type_name
 	5, // [5:5] is the sub-list for extension extendee
 	0, // [0:5] is the sub-list for field type_name
@@ -770,7 +766,7 @@ func file_pkg_rpc_proto_judge_proto_init() {
 			NumEnums:      2,
 			NumMessages:   4,
 			NumExtensions: 0,
-			NumServices:   2,
+			NumServices:   1,
 		},
 		GoTypes:           file_pkg_rpc_proto_judge_proto_goTypes,
 		DependencyIndexes: file_pkg_rpc_proto_judge_proto_depIdxs,
