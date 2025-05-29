@@ -170,10 +170,10 @@ func judgeTestCase(ctx context.Context, fullTemp string, userCode string, typesD
 	result.MemoryUsed = execResult.MemoryUsed
 	result.Output = execResult.Output
 
-	// 判断执行状态
+	// Determining execution status
 	if execResult.ExitCode != 0 {
 		if execResult.ErrorOutput != "" {
-			// 检查是否是编译错误
+			// Check if it is a compilation error
 			if strings.Contains(execResult.ErrorOutput, "compile") || strings.Contains(execResult.ErrorOutput, "syntax") {
 				result.Status = types.StatusCompilationError
 				result.ErrorMessage = execResult.ErrorOutput
@@ -188,28 +188,28 @@ func judgeTestCase(ctx context.Context, fullTemp string, userCode string, typesD
 		return result, nil
 	}
 
-	// 检查时间限制
+	// Check time limits
 	if limit != nil && execResult.TimeUsed > int64(limit.TimeLimit) {
 		result.Status = types.StatusTimeLimitExceeded
 		result.ErrorMessage = fmt.Sprintf("Time limit exceeded: %dms > %dms", execResult.TimeUsed, limit.TimeLimit)
 		return result, nil
 	}
 
-	// 检查内存限制
+	// Check memory limits
 	if limit != nil && execResult.MemoryUsed > int64(limit.MemoryLimit*1024*1024) {
 		result.Status = types.StatusMemoryLimitExceeded
 		result.ErrorMessage = fmt.Sprintf("Memory limit exceeded: %d bytes > %d bytes", execResult.MemoryUsed, limit.MemoryLimit*1024*1024)
 		return result, nil
 	}
 
-	// 比较输出结果
+	// compare output
 	compareConfig := &types.CompareConfig{
 		IgnoreWhitespace: true,
 		IgnoreCase:       false,
 		Precision:        -1,
 	}
 
-	if compareOutputAdvanced(strings.TrimSpace(execResult.Output), strings.TrimSpace(expectedOutput), compareConfig) {
+	if compareOutput(strings.TrimSpace(execResult.Output), strings.TrimSpace(expectedOutput), compareConfig) {
 		result.Status = types.StatusAccepted
 	} else {
 		result.Status = types.StatusWrongAnswer
@@ -219,7 +219,7 @@ func judgeTestCase(ctx context.Context, fullTemp string, userCode string, typesD
 	return result, nil
 }
 
-func compareOutputAdvanced(actual, expected string, config *types.CompareConfig) bool {
+func compareOutput(actual, expected string, config *types.CompareConfig) bool {
 	if config == nil {
 		config = &types.CompareConfig{
 			IgnoreWhitespace: true,
@@ -231,19 +231,16 @@ func compareOutputAdvanced(actual, expected string, config *types.CompareConfig)
 	actualProcessed := actual
 	expectedProcessed := expected
 
-	// 处理大小写
 	if config.IgnoreCase {
 		actualProcessed = strings.ToLower(actualProcessed)
 		expectedProcessed = strings.ToLower(expectedProcessed)
 	}
 
-	// 处理空白字符
 	if config.IgnoreWhitespace {
 		actualProcessed = strings.Join(strings.Fields(actualProcessed), " ")
 		expectedProcessed = strings.Join(strings.Fields(expectedProcessed), " ")
 	}
 
-	// 如果设置了浮点数精度，尝试按浮点数比较
 	if config.Precision >= 0 {
 		return compareFloatOutput(actualProcessed, expectedProcessed, config.Precision)
 	}
@@ -299,16 +296,16 @@ func calculateOverallStatistics(results []*rpc.Result, req *rpc.JudgeRequest) *r
 	var compareResultBuilder strings.Builder
 	var totalTime, maxTime, totalMemory, maxMemory int64
 	var correctCount uint32
-	var finalStatus rpc.Status = rpc.Status_status_accepted
+	var finalStatus = rpc.Status_status_accepted
 
 	for _, result := range results {
-		// 统计通过情况
+		// Statistics on adoption
 		if result.Status == rpc.Status_status_accepted {
 			compareResultBuilder.WriteString("1")
 			correctCount++
 		} else {
 			compareResultBuilder.WriteString("0")
-			// 更新最终状态（优先级：编译错误 > 运行时错误 > 其他错误）
+			// Update final status (priority: compile errors > runtime errors > other errors)
 			if finalStatus == rpc.Status_status_accepted ||
 				(result.Status == rpc.Status_status_compilation_error) ||
 				(result.Status == rpc.Status_status_runtime_error && finalStatus != rpc.Status_status_compilation_error) {
@@ -316,13 +313,13 @@ func calculateOverallStatistics(results []*rpc.Result, req *rpc.JudgeRequest) *r
 			}
 		}
 
-		// 时间统计
+		// time statics
 		totalTime += result.TimeUsed
 		if result.TimeUsed > maxTime {
 			maxTime = result.TimeUsed
 		}
 
-		// 内存统计
+		// memory statics
 		totalMemory += result.MemoryUsed
 		if result.MemoryUsed > maxMemory {
 			maxMemory = result.MemoryUsed
@@ -333,21 +330,19 @@ func calculateOverallStatistics(results []*rpc.Result, req *rpc.JudgeRequest) *r
 	stats.CompareResult = compareResultBuilder.String()
 	stats.FinalStatus = finalStatus
 
-	// 时间统计
 	stats.TotalTime = totalTime
 	stats.MaxTime = maxTime
 	if len(results) > 0 {
 		stats.AvgTime = totalTime / int64(len(results))
 	}
 
-	// 内存统计
 	stats.TotalMemory = totalMemory
 	stats.MaxMemory = maxMemory
 	if len(results) > 0 {
 		stats.AvgMemory = totalMemory / int64(len(results))
 	}
 
-	// 整体性能百分位（基于最差表现）
+	// Overall performance percentile (based on worst performance)
 	stats.OverallRuntimePercentile = calculatePercentile(maxTime, false)
 	stats.OverallMemoryPercentile = calculatePercentile(maxMemory, true)
 
