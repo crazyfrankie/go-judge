@@ -84,7 +84,7 @@ import (
 
 func main() {
     // 解析输入
-    input := "{{.TEST_CODE}}"
+    input := "{{.INPUT}}"
     result := processInput(input)
     fmt.Print(result)
 }

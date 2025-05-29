@@ -6,7 +6,6 @@ import (
 
 	"github.com/crazyfrankie/go-judge/pkg/judge"
 	"github.com/crazyfrankie/go-judge/pkg/rpc"
-	"github.com/crazyfrankie/go-judge/pkg/runner"
 	"google.golang.org/grpc"
 )
 
@@ -17,10 +16,6 @@ func main() {
 	// 注册服务
 	judgeService := judge.NewJudgeService()
 	rpc.RegisterJudgeServiceServer(s, judgeService)
-
-	// 注册 Runner 服务
-	goRunner := &runner.GoRunner{}
-	rpc.RegisterRunnerServiceServer(s, goRunner)
 
 	// 监听端口
 	lis, err := net.Listen("tcp", ":8080")
