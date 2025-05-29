@@ -24,8 +24,13 @@ func (g *GoRunner) Run(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeRe
 	cmd := exec.Command("whoami")
 	user, _ := cmd.CombinedOutput()
 
-	// build base dir
-	baseDir := fmt.Sprintf("%s/%d/%d", fmt.Sprintf(types.WorkDir, strings.TrimSpace(string(user))), req.GetProblemId(), req.GetUid())
+	// build work dir
+	workdir := fmt.Sprintf("%s/%d/%d", fmt.Sprintf(types.WorkDir, strings.TrimSpace(string(user))), req.GetProblemId(), req.GetUid())
+
+	if err := os.MkdirAll(workdir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create workdir: %v", err)
+	}
+	defer os.RemoveAll(workdir)
 
 	limit := &types.Limit{}
 	if req.GetMaxTime() != "" {
@@ -39,6 +44,47 @@ func (g *GoRunner) Run(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeRe
 		}
 	}
 
+	// parse code template
+	err := parseTemplate(req.GetFullTemplate(), req.GetCode(), req.GetTypeDefinition(), workdir)
+	if err != nil {
+		return nil, fmt.Errorf("template parse error: %v", err)
+	}
+
+	// precompile
+	compileRes, err := preCompile(workdir)
+	if err != nil || (compileRes != nil && compileRes.Status == types.StatusCompilationError) {
+		// 编译错误，直接返回
+		result := &rpc.Result{
+			Status:       rpc.Status_status_compilation_error,
+			ErrorMessage: compileRes.ErrorMessage,
+			StatusMsg:    "Compilation Error",
+		}
+
+		return &rpc.JudgeResponse{
+			Result: result,
+			Overall: &rpc.OverallStatistics{
+				TotalTestcases: uint32(len(req.GetInput())),
+				TotalCorrect:   0,
+				FinalStatus:    rpc.Status_status_compilation_error,
+				Finished:       true,
+			},
+		}, nil
+	}
+
+	// create watch shell
+	err = buildShellForWatch(workdir)
+	if err != nil {
+		return nil, err
+	}
+
+	containerID, err := startLongRunningContainer(ctx, workdir, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start container: %v", err)
+	}
+	defer func() {
+		stopContainer(containerID)
+	}()
+
 	var bestTimeResult *rpc.Result
 	var bestMemoryResult *rpc.Result
 	var totalTime int64
@@ -46,46 +92,31 @@ func (g *GoRunner) Run(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeRe
 	var maxMemory int64
 
 	for i, input := range req.GetInput() {
-		testWorkDir := fmt.Sprintf("%s/test_%d", baseDir, i)
-
 		expectedOutput := ""
 		if i < len(req.GetOutput()) {
 			expectedOutput = req.GetOutput()[i]
 		}
 
-		// 执行测试用例
-		testResult, err := judgeTestCase(ctx, req.GetFullTemplate(), req.GetCode(),
-			req.GetTypeDefinition(), input, expectedOutput, limit, testWorkDir)
-
-		result := &rpc.Result{
-			TimeUsed:       testResult.TimeUsed,
-			MemoryUsed:     testResult.MemoryUsed,
-			Output:         testResult.Output,
-			ExpectedOutput: testResult.ExpectedOutput,
-
-			// 格式化显示信息
-			StatusRuntime: formatRuntime(testResult.TimeUsed),
-			StatusMemory:  formatMemory(testResult.MemoryUsed),
-			StatusMsg:     getStatusMessage(testResult.Status),
-
-			// 性能百分位
-			RuntimePercentile: calculatePercentile(testResult.TimeUsed, false),
-			MemoryPercentile:  calculatePercentile(testResult.MemoryUsed, true),
-
-			// 错误信息
-			ErrorMessage:  testResult.ErrorMessage,
-			TestcaseInput: input,
+		testResult, err := g.judgeOneTest(limit, input, expectedOutput, workdir)
+		if err != nil {
+			testResult = &types.TestCaseResult{
+				Status:       types.StatusRuntimeError,
+				ErrorMessage: fmt.Sprintf("Test execution error: %v", err),
+			}
 		}
 
-		// 如果有执行结果详情，将错误信息添加到ErrorMessage
-		if testResult.ExecutionResult != nil {
-			if testResult.ExecutionResult.ErrorOutput != "" {
-				if result.ErrorMessage != "" {
-					result.ErrorMessage += "\n" + testResult.ExecutionResult.ErrorOutput
-				} else {
-					result.ErrorMessage = testResult.ExecutionResult.ErrorOutput
-				}
-			}
+		result := &rpc.Result{
+			TimeUsed:          testResult.TimeUsed,
+			MemoryUsed:        testResult.MemoryUsed,
+			Output:            testResult.Output,
+			ExpectedOutput:    testResult.ExpectedOutput,
+			StatusRuntime:     formatRuntime(testResult.TimeUsed),
+			StatusMemory:      formatMemory(testResult.MemoryUsed),
+			StatusMsg:         getStatusMessage(testResult.Status),
+			RuntimePercentile: calculatePercentile(testResult.TimeUsed, false),
+			MemoryPercentile:  calculatePercentile(testResult.MemoryUsed, true),
+			ErrorMessage:      testResult.ErrorMessage,
+			TestcaseInput:     input,
 		}
 
 		switch testResult.Status {
@@ -105,36 +136,27 @@ func (g *GoRunner) Run(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeRe
 			result.Status = rpc.Status_status_runtime_error
 		}
 
-		if err != nil {
-			result.Status = rpc.Status_status_runtime_error
-			result.Output = fmt.Sprintf("Internal error: %v", err)
-		}
-
-		// 如果有错误，立即返回错误结果，不执行后续测试用例
 		if result.Status != rpc.Status_status_accepted {
-			result.FailedTestcaseIndex = int32(i) // 设置失败的测试用例索引
+			result.FailedTestcaseIndex = int32(i)
 			return &rpc.JudgeResponse{
 				Result: result,
 				Overall: &rpc.OverallStatistics{
 					TotalTestcases: uint32(len(req.GetInput())),
-					TotalCorrect:   uint32(i),                    // 失败前通过的测试用例数
-					CompareResult:  strings.Repeat("1", i) + "X", // X表示在此处失败
+					TotalCorrect:   uint32(i),
+					CompareResult:  strings.Repeat("1", i) + "X",
 					FinalStatus:    result.Status,
-					SubmissionId:   fmt.Sprintf("%d_%d_%d", req.GetProblemId(), req.GetUid(), time.Now().Unix()),
 					TaskFinishTime: uint64(time.Now().UnixMilli()),
 					Finished:       true,
 				},
 			}, nil
 		}
 
-		// 累计统计信息
 		totalTime += testResult.TimeUsed
 		totalMemory += testResult.MemoryUsed
 		if testResult.MemoryUsed > maxMemory {
 			maxMemory = testResult.MemoryUsed
 		}
 
-		// 记录最优结果
 		if bestTimeResult == nil || testResult.TimeUsed < bestTimeResult.TimeUsed {
 			bestTimeResult = result
 		}
@@ -156,7 +178,6 @@ func (g *GoRunner) Run(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeRe
 		MaxMemory:                maxMemory,
 		AvgMemory:                totalMemory / int64(len(req.GetInput())),
 		FinalStatus:              rpc.Status_status_accepted,
-		SubmissionId:             fmt.Sprintf("%d_%d_%d", req.GetProblemId(), req.GetUid(), time.Now().Unix()),
 		TaskFinishTime:           uint64(time.Now().UnixMilli()),
 		Finished:                 true,
 		OverallRuntimePercentile: bestResult.RuntimePercentile,
@@ -169,51 +190,25 @@ func (g *GoRunner) Run(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeRe
 	}, nil
 }
 
-func judgeTestCase(ctx context.Context, fullTemp string, userCode string, typesDef string, input string, expectedOutput string, limit *types.Limit, workdir string) (*types.TestCaseResult, error) {
+func (g *GoRunner) judgeOneTest(limit *types.Limit, input string, expectedOutput string, workdir string) (*types.TestCaseResult, error) {
 	result := &types.TestCaseResult{
 		ExpectedOutput: expectedOutput,
 	}
 
-	// make sure dir is existed
-	if err := os.MkdirAll(workdir, 0755); err != nil {
-		result.Status = types.StatusRuntimeError
-		result.ErrorMessage = fmt.Sprintf("Failed to create workdir: %v", err)
-		return result, nil
-	}
-
-	// parse code template
-	err := parseTemplate(fullTemp, userCode, typesDef, input, workdir)
-	if err != nil {
-		result.Status = types.StatusCompilationError
-		result.ErrorMessage = fmt.Sprintf("Template parse error: %v", err)
-		return result, nil
-	}
-
-	// generate run shell
-	err = buildShell(workdir)
+	err := buildShellRunExec(workdir, input)
 	if err != nil {
 		result.Status = types.StatusRuntimeError
 		result.ErrorMessage = fmt.Sprintf("Failed to create shell script: %v", err)
 		return result, nil
 	}
 
-	// run in docker container
-	err = runDocker(ctx, limit, workdir)
+	execResult, err := waitForContainerExecution(workdir, 30*time.Second)
 	if err != nil {
 		result.Status = types.StatusRuntimeError
-		result.ErrorMessage = fmt.Sprintf("Docker execution error: %v", err)
+		result.ErrorMessage = fmt.Sprintf("Container execution failed: %v", err)
 		return result, nil
 	}
-	// 解析执行结果
-	execResult, err := parseStatsFile(workdir)
-	if err != nil {
-		result.Status = types.StatusRuntimeError
-		result.ErrorMessage = fmt.Sprintf("Failed to parse execution result: %v", err)
-		return result, nil
-	}
-	defer func() {
-		os.RemoveAll(workdir)
-	}()
+
 	result.ExecutionResult = execResult
 	result.TimeUsed = execResult.TimeUsed
 	result.MemoryUsed = execResult.MemoryUsed
@@ -221,13 +216,8 @@ func judgeTestCase(ctx context.Context, fullTemp string, userCode string, typesD
 
 	if execResult.ExitCode != 0 {
 		if execResult.ErrorOutput != "" {
-			if strings.Contains(execResult.ErrorOutput, "compile") || strings.Contains(execResult.ErrorOutput, "syntax") {
-				result.Status = types.StatusCompilationError
-				result.ErrorMessage = execResult.ErrorOutput
-			} else {
-				result.Status = types.StatusRuntimeError
-				result.ErrorMessage = execResult.ErrorOutput
-			}
+			result.Status = types.StatusRuntimeError
+			result.ErrorMessage = execResult.ErrorOutput
 		} else {
 			result.Status = types.StatusRuntimeError
 			result.ErrorMessage = "Program exited with non-zero code"
@@ -235,28 +225,25 @@ func judgeTestCase(ctx context.Context, fullTemp string, userCode string, typesD
 		return result, nil
 	}
 
-	// Check time limits
 	if limit != nil && execResult.TimeUsed > int64(limit.TimeLimit) {
 		result.Status = types.StatusTimeLimitExceeded
 		result.ErrorMessage = fmt.Sprintf("Time limit exceeded: %dms > %dms", execResult.TimeUsed, limit.TimeLimit)
 		return result, nil
 	}
 
-	// Check memory limits
 	if limit != nil && execResult.MemoryUsed > int64(limit.MemoryLimit*1024*1024) {
 		result.Status = types.StatusMemoryLimitExceeded
 		result.ErrorMessage = fmt.Sprintf("Memory limit exceeded: %d bytes > %d bytes", execResult.MemoryUsed, limit.MemoryLimit*1024*1024)
 		return result, nil
 	}
 
-	// compare output
 	compareConfig := &types.CompareConfig{
 		IgnoreWhitespace: true,
 		IgnoreCase:       false,
 		Precision:        -1,
 	}
 
-	if compareOutput(strings.TrimSpace(execResult.Output), strings.TrimSpace(expectedOutput), compareConfig) {
+	if compareOutput(result.Output, expectedOutput, compareConfig) {
 		result.Status = types.StatusAccepted
 	} else {
 		result.Status = types.StatusWrongAnswer
@@ -264,6 +251,208 @@ func judgeTestCase(ctx context.Context, fullTemp string, userCode string, typesD
 	}
 
 	return result, nil
+}
+
+func parseTemplate(fullTemp string, userCode string, types string, workdir string) error {
+	tpl, _ := template.New("main").Parse(fullTemp)
+
+	tmp, _ := os.CreateTemp(os.TempDir(), "main_*.go")
+	defer os.Remove(tmp.Name())
+
+	err := tpl.Execute(tmp, map[string]string{
+		"TYPES":     types,
+		"USER_CODE": userCode,
+		"IMPORTS":   "",
+	})
+	if err != nil {
+		return err
+	}
+
+	content, _ := os.ReadFile(tmp.Name())
+	imports := detectImports(string(content))
+
+	var final string
+	if len(imports) != 0 {
+		final = "\n\nimport (\n" + strings.Join(imports, "\n") + "\n)\n"
+	}
+
+	newTpl, _ := template.New("main").Parse(fullTemp)
+	codeFile, _ := os.OpenFile(fmt.Sprintf("%s/main.go", workdir), os.O_CREATE|os.O_RDWR, 0644)
+	err = newTpl.Execute(codeFile, map[string]string{
+		"USER_CODE": userCode,
+		"TYPES":     types,
+		"IMPORTS":   final,
+	})
+	defer codeFile.Close()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func detectImports(code string) []string {
+	set := make(map[string]bool)
+	fset := token.NewFileSet()
+	f, _ := parser.ParseFile(fset, "", code, parser.AllErrors)
+	ast.Inspect(f, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok {
+			if ident, ok := sel.X.(*ast.Ident); ok {
+				set[ident.Name] = true
+			}
+		}
+		return true
+	})
+	allowed := map[string]string{
+		"fmt":     `"fmt"`,
+		"sort":    `"sort"`,
+		"math":    `"math"`,
+		"strings": `"strings"`,
+		"strconv": `"strconv"`,
+		"heap":    `"container/heap"`,
+		"json":    `"encoding/json"`,
+	}
+	var imports []string
+	for name := range set {
+		if imp, ok := allowed[name]; ok {
+			imports = append(imports, imp)
+		}
+	}
+	return imports
+}
+
+func preCompile(workdir string) (*types.PreCompileResult, error) {
+	result := &types.PreCompileResult{}
+
+	shFile := fmt.Sprintf("%s/%s", workdir, "build.sh")
+	sh, err := os.OpenFile(shFile, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, err
+	}
+	defer sh.Close()
+	if _, err = sh.WriteString(fmt.Sprintf(types.GoBuildShell, workdir)); err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("chmod", "+x", sh.Name())
+	cmd.Run()
+
+	cmd = exec.Command("sh", shFile)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		result.Status = types.StatusCompilationError
+		result.ErrorMessage = string(out)
+		return result, nil
+	}
+
+	return nil, nil
+}
+
+func buildShellForWatch(workdir string) error {
+	var sh = `#!/bin/sh
+while inotifywait -e create,modify /app; do
+    [ -f ./run.sh ] && ./run.sh && rm -f ./run.sh
+done`
+
+	runFile := fmt.Sprintf("%s/entrypoint.sh", workdir)
+	err := os.WriteFile(runFile, []byte(sh), 0755)
+	if err != nil {
+		return fmt.Errorf("failed to write run.sh: %v", err)
+	}
+
+	cmd := exec.Command("chmod", "+x", runFile)
+	err = cmd.Run()
+
+	return err
+}
+
+func startLongRunningContainer(ctx context.Context, workdir string, limit *types.Limit) (string, error) {
+	args := buildDockerArgs(limit)
+	defaultArgs := []string{
+		"run", "-d",
+		"-v", fmt.Sprintf("%s:/app", workdir),
+		"--name", fmt.Sprintf("judge-container-%d", time.Now().UnixNano()),
+	}
+
+	args = append(defaultArgs, args...)
+	args = append(args, types.GoImage)
+
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to start container: %v", err)
+	}
+
+	containerID := strings.TrimSpace(string(output))
+	fmt.Printf("Started judge container: %s\n", containerID)
+
+	return containerID, nil
+}
+
+func buildShellRunExec(workdir string, input string) error {
+	runFile := fmt.Sprintf("%s/run.sh", workdir)
+	err := os.WriteFile(runFile, []byte(fmt.Sprintf(types.GoRunShell, input)), 0755)
+	if err != nil {
+		return fmt.Errorf("failed to write run.sh: %v", err)
+	}
+
+	return nil
+}
+
+// waitForContainerExecution Waiting for container execution to complete (by listening for file system changes)
+func waitForContainerExecution(workdir string, timeout time.Duration) (*types.ExecutionResult, error) {
+	runFile := fmt.Sprintf("%s/run.sh", workdir)
+	resultFile := fmt.Sprintf("%s/result.txt", workdir)
+
+	start := time.Now()
+
+	// Wait for the run.sh file to be deleted by the container (indicating completion of execution)
+	for time.Since(start) < timeout {
+		// Check if run.sh still exists.
+		if _, err := os.Stat(runFile); os.IsNotExist(err) {
+			// run.sh has been deleted, check if the result file was generated
+			if _, err := os.Stat(resultFile); err == nil {
+				// Result file exists, parse results
+				return parseStatsFile(workdir)
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return nil, fmt.Errorf("container execution timeout after %v", timeout)
+}
+
+// buildDockerArgs Building Docker startup parameters
+func buildDockerArgs(limit *types.Limit) []string {
+	args := make([]string, 0, 8)
+
+	// 内存限制 - 用户程序限制 + Go编译器和运行时开销
+	// Go编译器和运行时需要额外的128MB内存
+	memLimit := limit.MemoryLimit + 128
+	memStr := fmt.Sprintf("%dm", memLimit)
+	args = append(args, "--memory="+memStr)
+
+	// 限制进程数量 - Go编译器需要很多子进程，所以给一个合理的限制
+	args = append(args, "--pids-limit=200")
+
+	// CPU时间限制（秒） - 用户程序时间 + 编译时间
+	// 给Go编译过程额外20秒时间
+	cpuSeconds := int(math.Ceil(float64(limit.TimeLimit)/1000)) + 20
+	args = append(args, "--ulimit", fmt.Sprintf("cpu=%d:%d", cpuSeconds, cpuSeconds))
+
+	// 文件描述符限制 - 编译需要打开很多文件
+	args = append(args, "--ulimit", "nofile=2048:2048")
+
+	// 临时文件系统，允许执行和写入
+	args = append(args, "--tmpfs", "/tmp:exec,size=300m")
+
+	// 网络隔离
+	args = append(args, "--network=none")
+
+	// 安全选项
+	args = append(args, "--security-opt=no-new-privileges")
+	args = append(args, "--cap-drop=ALL")
+
+	return args
 }
 
 func compareOutput(actual, expected string, config *types.CompareConfig) bool {
@@ -323,138 +512,6 @@ func extractNumbers(s string) []float64 {
 	}
 
 	return numbers
-}
-
-func parseTemplate(fullTemp string, userCode string, types string, input string, workdir string) error {
-	tpl, _ := template.New("main").Parse(fullTemp)
-
-	tmp, _ := os.CreateTemp(os.TempDir(), "main_*.go")
-	defer os.Remove(tmp.Name())
-
-	err := tpl.Execute(tmp, map[string]string{
-		"TYPES":     types,
-		"USER_CODE": userCode,
-		"INPUT":     input,
-		"IMPORTS":   "",
-	})
-	if err != nil {
-		return err
-	}
-
-	content, _ := os.ReadFile(tmp.Name())
-	imports := detectImports(string(content))
-
-	var final string
-	if len(imports) != 0 {
-		final = "\n\nimport (\n" + strings.Join(imports, "\n") + "\n)\n"
-	}
-
-	newTpl, _ := template.New("main").Parse(fullTemp)
-	codeFile, _ := os.OpenFile(fmt.Sprintf("%s/main.go", workdir), os.O_CREATE|os.O_RDWR, 0644)
-	err = newTpl.Execute(codeFile, map[string]string{
-		"USER_CODE": userCode,
-		"INPUT":     input,
-		"TYPES":     types,
-		"IMPORTS":   final,
-	})
-	defer codeFile.Close()
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func detectImports(code string) []string {
-	set := make(map[string]bool)
-	fset := token.NewFileSet()
-	f, _ := parser.ParseFile(fset, "", code, parser.AllErrors)
-	ast.Inspect(f, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok {
-			if ident, ok := sel.X.(*ast.Ident); ok {
-				set[ident.Name] = true
-			}
-		}
-		return true
-	})
-	allowed := map[string]string{
-		"fmt":     `"fmt"`,
-		"sort":    `"sort"`,
-		"math":    `"math"`,
-		"strings": `"strings"`,
-		"strconv": `"strconv"`,
-		"heap":    `"container/heap"`,
-		"json":    `"encoding/json"`,
-	}
-	var imports []string
-	for name := range set {
-		if imp, ok := allowed[name]; ok {
-			imports = append(imports, imp)
-		}
-	}
-	return imports
-}
-
-func buildShell(workdir string) error {
-	sh, err := os.OpenFile(fmt.Sprintf("%s/run.sh", workdir), os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return err
-	}
-	defer sh.Close()
-	res := fmt.Sprintf(types.GoShell, "main.go", "main.go")
-	if _, err = sh.WriteString(res); err != nil {
-		return err
-	}
-
-	cmd := exec.Command("chmod", "+x", sh.Name())
-	return cmd.Run()
-}
-
-func runDocker(ctx context.Context, limit *types.Limit, workdir string) error {
-	args := buildDockerArgs(limit)
-	defaultArgs := []string{"run", "--rm", "-v", fmt.Sprintf("%s:/app", workdir)}
-
-	args = append(defaultArgs, args...)
-	args = append(args, types.GoImage)
-
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
-}
-
-func buildDockerArgs(limit *types.Limit) []string {
-	args := make([]string, 0, 8)
-
-	// Memory limitations - user program limitations + Go compiler and runtime overheads
-	// Go compiler and runtime require an additional 128MB of memory
-	memLimit := limit.MemoryLimit + 128
-	memStr := fmt.Sprintf("%dm", memLimit)
-	args = append(args, "--memory="+memStr)
-
-	// Limit the number of processes - the Go compiler requires a lot of sub-processes, so there's a good limit.
-	args = append(args, "--pids-limit=200")
-
-	// CPU time limit (seconds) - user program time + compilation time
-	// Give an extra 20 seconds to the Go compilation process
-	cpuSeconds := int(math.Ceil(float64(limit.TimeLimit)/1000)) + 20
-	args = append(args, "--ulimit", fmt.Sprintf("cpu=%d:%d", cpuSeconds, cpuSeconds))
-
-	// File descriptor limitations - compiling requires opening many files
-	args = append(args, "--ulimit", "nofile=2048:2048")
-
-	// Temporary file system, allowing execution and writing
-	args = append(args, "--tmpfs", "/tmp:exec,size=300m")
-
-	// Network isolation
-	args = append(args, "--network=none")
-
-	// Security Options
-	args = append(args, "--security-opt=no-new-privileges")
-	args = append(args, "--cap-drop=ALL")
-
-	return args
 }
 
 func parseStatsFile(workdir string) (*types.ExecutionResult, error) {
@@ -637,4 +694,19 @@ func parseElapsedTime(timeStr string) float64 {
 	}
 
 	return 0
+}
+
+// stopContainer stop and clean container
+func stopContainer(containerID string) {
+	if containerID == "" {
+		return
+	}
+
+	cmd := exec.Command("docker", "stop", containerID)
+	cmd.Run()
+
+	cmd = exec.Command("docker", "rm", containerID)
+	cmd.Run()
+
+	fmt.Printf("Stopped and removed container: %s\n", containerID)
 }

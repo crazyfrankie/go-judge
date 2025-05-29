@@ -5,37 +5,47 @@ const (
 )
 
 const (
-	GoShell = `#!/bin/sh
+	GoBuildShell = `
+#!/bin/sh
 set -e
-cd /app
+cd %s
 
-# [1/5] 清理之前的结果文件
+# [1/3] 清理之前的结果文件
 rm -f result.txt error.txt stats.txt exitcode.txt compile.txt
 
-# [2/5] 编译检查和格式化
-echo "Compiling..." > /tmp/compile.log
-if ! go fmt %s > compile.txt 2>&1; then
+# [2/3] 编译检查和格式化
+if ! go fmt main.go > compile.txt 2>&1; then
     echo "1" > exitcode.txt
     cat compile.txt > error.txt
     echo "Format error" >> error.txt
     exit 1
 fi
 
-# [3/5] 编译程序（不运行）
-if ! go build -o /tmp/program %s > compile.txt 2>&1; then
+# [3/3] 编译新的文件
+if ! go build main.go > compile.txt 2>&1; then
     echo "1" > exitcode.txt
     cat compile.txt > error.txt
     echo "Compilation error" >> error.txt
     exit 1
 fi
+`
 
-# [4/5] 运行编译好的程序并测量时间
-echo "Running..." > /tmp/run.log
-/usr/bin/time -v -o stats.txt timeout 30s /tmp/program > result.txt 2> error.txt
+	GoRunShell = `
+#!/bin/sh
+set -e
+cd /app
+
+# 清理之前的结果文件
+rm -f result.txt error.txt stats.txt exitcode.txt
+
+# 运行预编译的程序并收集统计信息
+echo '%s' | /usr/bin/time -v -o stats.txt timeout 30s ./main > result.txt 2> error.txt
 echo $? > exitcode.txt
 
-# [5/5] 清理临时文件
-rm -f /tmp/program compile.txt
+echo "Test execution completed"
 `
-	GoImage = "oj/go-runner:1.24"
+)
+
+const (
+	GoImage = "oj/go-runner:1.24.2"
 )

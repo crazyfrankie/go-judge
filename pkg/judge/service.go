@@ -22,7 +22,6 @@ func NewJudgeService() *JudgeService {
 }
 
 func (j *JudgeService) Judge(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeResponse, error) {
-	// 根据语言选择对应的 runner
 	var response *rpc.JudgeResponse
 	var err error
 
@@ -55,9 +54,8 @@ func (j *JudgeService) Judge(ctx context.Context, req *rpc.JudgeRequest) (*rpc.J
 	return response, nil
 }
 
-// 记录评测结果（可选）
 func (j *JudgeService) logJudgeResult(req *rpc.JudgeRequest, resp *rpc.JudgeResponse) {
-	// 使用overall统计信息
+
 	if resp.Overall != nil {
 		overall := resp.Overall
 		fmt.Printf("Judge completed - Problem: %d, User: %d, Total: %d, Correct: %d, Status: %v\n",
@@ -69,7 +67,6 @@ func (j *JudgeService) logJudgeResult(req *rpc.JudgeRequest, resp *rpc.JudgeResp
 		}
 	}
 
-	// 记录单个结果信息
 	if resp.Result != nil {
 		result := resp.Result
 		fmt.Printf("Result - Status: %v, Time: %dms, Memory: %d bytes\n",
@@ -81,7 +78,6 @@ func (j *JudgeService) logJudgeResult(req *rpc.JudgeRequest, resp *rpc.JudgeResp
 	}
 }
 
-// 创建详细的评测结果
 func (j *JudgeService) createDetailedResult(results []*types.TestCaseResult) *types.JudgeResult {
 	if len(results) == 0 {
 		return &types.JudgeResult{
@@ -90,7 +86,6 @@ func (j *JudgeService) createDetailedResult(results []*types.TestCaseResult) *ty
 		}
 	}
 
-	// 计算整体状态
 	overallStatus := types.StatusAccepted
 	var errorMessage string
 
@@ -100,14 +95,12 @@ func (j *JudgeService) createDetailedResult(results []*types.TestCaseResult) *ty
 			if errorMessage == "" && result.ErrorMessage != "" {
 				errorMessage = result.ErrorMessage
 			}
-			// 如果是编译错误，立即返回
 			if result.Status == types.StatusCompilationError {
 				break
 			}
 		}
 	}
 
-	// 计算统计信息
 	statistics := j.calculateStatistics(results)
 
 	return &types.JudgeResult{
@@ -119,7 +112,6 @@ func (j *JudgeService) createDetailedResult(results []*types.TestCaseResult) *ty
 	}
 }
 
-// 计算统计信息
 func (j *JudgeService) calculateStatistics(results []*types.TestCaseResult) *types.JudgeStatistics {
 	stats := &types.JudgeStatistics{
 		TotalTestCases: len(results),

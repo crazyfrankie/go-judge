@@ -10,6 +10,11 @@ type ErrorRecord struct {
 	Num int
 }
 
+type PreCompileResult struct {
+	Status       Status `json:"status"`
+	ErrorMessage string `json:"error_message"`
+}
+
 type ExecutionResult struct {
 	TimeUsed    int64  `json:"time_used"`    // 执行时间（毫秒）
 	MemoryUsed  int64  `json:"memory_used"`  // 内存使用（字节）
