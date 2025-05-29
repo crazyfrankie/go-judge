@@ -20,7 +20,7 @@ import (
 
 type GoRunner struct{}
 
-func (g *GoRunner) Run(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeResponse, error) {
+func (g *GoRunner) RunWithDocker(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeResponse, error) {
 	cmd := exec.Command("whoami")
 	user, _ := cmd.CombinedOutput()
 
@@ -188,6 +188,217 @@ func (g *GoRunner) Run(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeRe
 		Result:  bestResult,
 		Overall: overall,
 	}, nil
+}
+
+func (g *GoRunner) RunWithSandbox(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeResponse, error) {
+	cmd := exec.Command("whoami")
+	user, _ := cmd.CombinedOutput()
+
+	// build work dir
+	workdir := fmt.Sprintf("%s/%d/%d", fmt.Sprintf(types.WorkDir, strings.TrimSpace(string(user))), req.GetProblemId(), req.GetUid())
+
+	if err := os.MkdirAll(workdir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create workdir: %v", err)
+	}
+	defer os.RemoveAll(workdir)
+
+	limit := &types.Limit{}
+	if req.GetMaxTime() != "" {
+		if timeLimit, err := strconv.Atoi(req.GetMaxTime()); err == nil {
+			limit.TimeLimit = timeLimit
+		}
+	}
+	if req.GetMaxMem() != "" {
+		if memLimit, err := strconv.Atoi(req.GetMaxMem()); err == nil {
+			limit.MemoryLimit = memLimit
+		}
+	}
+
+	// parse code template
+	err := parseTemplate(req.GetFullTemplate(), req.GetCode(), req.GetTypeDefinition(), workdir)
+	if err != nil {
+		return nil, fmt.Errorf("template parse error: %v", err)
+	}
+
+	// precompile
+	compileRes, err := preCompile(workdir)
+	if err != nil || (compileRes != nil && compileRes.Status == types.StatusCompilationError) {
+		result := &rpc.Result{
+			Status:       rpc.Status_status_compilation_error,
+			ErrorMessage: compileRes.ErrorMessage,
+			StatusMsg:    "Compilation Error",
+		}
+
+		return &rpc.JudgeResponse{
+			Result: result,
+			Overall: &rpc.OverallStatistics{
+				TotalTestcases: uint32(len(req.GetInput())),
+				TotalCorrect:   0,
+				FinalStatus:    rpc.Status_status_compilation_error,
+				Finished:       true,
+			},
+		}, nil
+	}
+
+	// 使用沙箱执行测试用例
+	start := time.Now()
+	testResults, err := g.runWithNativeSandbox(limit, req.GetInput(), req.GetOutput(), workdir)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox execution failed: %v", err)
+	}
+	totalExecutionTime := time.Since(start)
+	fmt.Printf("Sandbox execution completed in %v for %d test cases\n", totalExecutionTime, len(req.GetInput()))
+
+	// 处理结果
+	var bestTimeResult *rpc.Result
+	var bestMemoryResult *rpc.Result
+	var totalTime int64
+	var totalMemory int64
+	var maxMemory int64
+
+	for i, testResult := range testResults {
+		input := ""
+		if i < len(req.GetInput()) {
+			input = req.GetInput()[i]
+		}
+
+		result := &rpc.Result{
+			TimeUsed:          testResult.TimeUsed,
+			MemoryUsed:        testResult.MemoryUsed,
+			Output:            testResult.Output,
+			ExpectedOutput:    testResult.ExpectedOutput,
+			StatusRuntime:     formatRuntime(testResult.TimeUsed),
+			StatusMemory:      formatMemory(testResult.MemoryUsed),
+			StatusMsg:         getStatusMessage(testResult.Status),
+			RuntimePercentile: calculatePercentile(testResult.TimeUsed, false),
+			MemoryPercentile:  calculatePercentile(testResult.MemoryUsed, true),
+			ErrorMessage:      testResult.ErrorMessage,
+			TestcaseInput:     input,
+		}
+
+		switch testResult.Status {
+		case types.StatusAccepted:
+			result.Status = rpc.Status_status_accepted
+		case types.StatusWrongAnswer:
+			result.Status = rpc.Status_status_wrong_answer
+		case types.StatusTimeLimitExceeded:
+			result.Status = rpc.Status_status_time_limit_exceeded
+		case types.StatusMemoryLimitExceeded:
+			result.Status = rpc.Status_status_memory_limit_exceeded
+		case types.StatusRuntimeError:
+			result.Status = rpc.Status_status_runtime_error
+		case types.StatusCompilationError:
+			result.Status = rpc.Status_status_compilation_error
+		default:
+			result.Status = rpc.Status_status_runtime_error
+		}
+
+		if result.Status != rpc.Status_status_accepted {
+			result.FailedTestcaseIndex = int32(i)
+			return &rpc.JudgeResponse{
+				Result: result,
+				Overall: &rpc.OverallStatistics{
+					TotalTestcases: uint32(len(req.GetInput())),
+					TotalCorrect:   uint32(i),
+					CompareResult:  strings.Repeat("1", i) + "X",
+					FinalStatus:    result.Status,
+					TaskFinishTime: uint64(time.Now().UnixMilli()),
+					Finished:       true,
+				},
+			}, nil
+		}
+
+		totalTime += testResult.TimeUsed
+		totalMemory += testResult.MemoryUsed
+		if testResult.MemoryUsed > maxMemory {
+			maxMemory = testResult.MemoryUsed
+		}
+
+		if bestTimeResult == nil || testResult.TimeUsed < bestTimeResult.TimeUsed {
+			bestTimeResult = result
+		}
+		if bestMemoryResult == nil || testResult.MemoryUsed < bestMemoryResult.MemoryUsed {
+			bestMemoryResult = result
+		}
+	}
+
+	bestResult := bestTimeResult
+	if bestMemoryResult != nil && bestMemoryResult.MemoryUsed < bestResult.MemoryUsed {
+		bestResult = bestMemoryResult
+	}
+
+	overall := &rpc.OverallStatistics{
+		TotalTestcases:           uint32(len(req.GetInput())),
+		TotalCorrect:             uint32(len(req.GetInput())),
+		CompareResult:            strings.Repeat("1", len(req.GetInput())),
+		TotalTime:                totalTime,
+		MaxMemory:                maxMemory,
+		AvgMemory:                totalMemory / int64(len(req.GetInput())),
+		FinalStatus:              rpc.Status_status_accepted,
+		TaskFinishTime:           uint64(time.Now().UnixMilli()),
+		Finished:                 true,
+		OverallRuntimePercentile: bestResult.RuntimePercentile,
+		OverallMemoryPercentile:  bestResult.MemoryPercentile,
+	}
+
+	return &rpc.JudgeResponse{
+		Result:  bestResult,
+		Overall: overall,
+	}, nil
+}
+
+// runWithNativeSandbox run user code in linux native
+func (g *GoRunner) runWithNativeSandbox(limit *types.Limit, inputs []string, expectedOutputs []string, workdir string) ([]*types.TestCaseResult, error) {
+	results := make([]*types.TestCaseResult, 0, len(inputs))
+
+	for i, input := range inputs {
+		result := &types.TestCaseResult{
+			ExpectedOutput: expectedOutputs[i],
+		}
+
+		// 使用沙箱执行单个测试用例
+		sandboxResult, err := ExecuteWithSandbox(workdir, limit.TimeLimit, limit.MemoryLimit, input)
+		if err != nil {
+			result.Status = types.StatusRuntimeError
+			result.ErrorMessage = fmt.Sprintf("Sandbox execution failed: %v", err)
+		} else {
+			// 复制沙箱结果到测试结果
+			result.TimeUsed = sandboxResult.TimeUsed
+			result.MemoryUsed = sandboxResult.MemoryUsed
+			result.Output = sandboxResult.Output
+			result.ExecutionResult = &types.ExecutionResult{
+				TimeUsed:    sandboxResult.TimeUsed,
+				MemoryUsed:  sandboxResult.MemoryUsed,
+				ExitCode:    sandboxResult.ExitCode,
+				Output:      sandboxResult.Output,
+				ErrorOutput: sandboxResult.ErrorOutput,
+			}
+
+			// 判断状态
+			if sandboxResult.Status == types.StatusAccepted {
+				// 比较输出
+				compareConfig := &types.CompareConfig{
+					IgnoreWhitespace: true,
+					IgnoreCase:       false,
+					Precision:        -1,
+				}
+
+				if compareOutput(result.Output, result.ExpectedOutput, compareConfig) {
+					result.Status = types.StatusAccepted
+				} else {
+					result.Status = types.StatusWrongAnswer
+					result.ErrorMessage = "Output mismatch"
+				}
+			} else {
+				result.Status = sandboxResult.Status
+				result.ErrorMessage = getStatusMessage(sandboxResult.Status)
+			}
+		}
+
+		results = append(results, result)
+	}
+
+	return results, nil
 }
 
 func (g *GoRunner) judgeOneTest(limit *types.Limit, input string, expectedOutput string, workdir string) (*types.TestCaseResult, error) {
@@ -405,6 +616,10 @@ func waitForContainerExecution(workdir string, timeout time.Duration) (*types.Ex
 
 	start := time.Now()
 
+	// 优化1: 使用自适应轮询间隔
+	pollInterval := 5 * time.Millisecond // 从5ms开始
+	maxInterval := 50 * time.Millisecond // 最大50ms
+
 	// Wait for the run.sh file to be deleted by the container (indicating completion of execution)
 	for time.Since(start) < timeout {
 		// Check if run.sh still exists.
@@ -415,7 +630,16 @@ func waitForContainerExecution(workdir string, timeout time.Duration) (*types.Ex
 				return parseStatsFile(workdir)
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+
+		time.Sleep(pollInterval)
+
+		// 自适应增加轮询间隔，避免过度占用CPU
+		if pollInterval < maxInterval {
+			pollInterval = time.Duration(float64(pollInterval) * 1.5)
+			if pollInterval > maxInterval {
+				pollInterval = maxInterval
+			}
+		}
 	}
 
 	return nil, fmt.Errorf("container execution timeout after %v", timeout)

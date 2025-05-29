@@ -27,7 +27,7 @@ func (j *JudgeService) Judge(ctx context.Context, req *rpc.JudgeRequest) (*rpc.J
 
 	switch req.GetLanguage() {
 	case rpc.Language_go:
-		response, err = j.goRunner.Run(ctx, req)
+		response, err = j.goRunner.RunWithSandbox(ctx, req)
 	case rpc.Language_java:
 		// TODO: 实现 Java runner
 		return nil, fmt.Errorf("Java runner not implemented yet")
@@ -45,9 +45,7 @@ func (j *JudgeService) Judge(ctx context.Context, req *rpc.JudgeRequest) (*rpc.J
 		return nil, fmt.Errorf("judge execution failed: %v", err)
 	}
 
-	// 添加提交ID和时间戳等元数据
 	if response != nil {
-		// 这里可以添加额外的处理逻辑，比如记录到数据库等
 		j.logJudgeResult(req, response)
 	}
 
