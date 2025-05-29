@@ -45,13 +45,33 @@ func main() {
 	}
 
 	// 打印结果
-	log.Printf("Judge completed with %d test cases", len(resp.Results))
-	for i, result := range resp.Results {
-		log.Printf("Test case %d: Status=%v, Time=%dms, Memory=%d bytes",
-			i+1, result.Status, result.TimeUsed, result.MemoryUsed)
+	log.Printf("Judge completed")
+	
+	if resp.Result != nil {
+		result := resp.Result
+		log.Printf("Result: Status=%v, Time=%dms, Memory=%d bytes",
+			result.Status, result.TimeUsed, result.MemoryUsed)
+		log.Printf("Runtime: %s, Memory: %s, Message: %s",
+			result.StatusRuntime, result.StatusMemory, result.StatusMsg)
+		
 		if result.Status != rpc.Status_status_accepted {
 			log.Printf("  Expected: %s", result.ExpectedOutput)
 			log.Printf("  Actual:   %s", result.Output)
+			if result.ErrorMessage != "" {
+				log.Printf("  Error: %s", result.ErrorMessage)
+			}
+			if result.FailedTestcaseIndex >= 0 {
+				log.Printf("  Failed at test case: %d", result.FailedTestcaseIndex)
+			}
+		}
+	}
+	
+	if resp.Overall != nil {
+		overall := resp.Overall
+		log.Printf("Overall: %d/%d test cases passed (%s)",
+			overall.TotalCorrect, overall.TotalTestcases, overall.CompareResult)
+		if overall.FinalStatus == rpc.Status_status_accepted {
+			log.Printf("Total time: %dms, Max memory: %d bytes", overall.TotalTime, overall.MaxMemory)
 		}
 	}
 }

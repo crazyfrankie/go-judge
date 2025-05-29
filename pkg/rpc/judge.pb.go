@@ -141,8 +141,8 @@ type JudgeRequest struct {
 	TypeDefinition string                 `protobuf:"bytes,6,opt,name=type_definition,json=typeDefinition,proto3" json:"type_definition,omitempty"`
 	Input          []string               `protobuf:"bytes,7,rep,name=input,proto3" json:"input,omitempty"`
 	Output         []string               `protobuf:"bytes,8,rep,name=output,proto3" json:"output,omitempty"`
-	MaxMem         string                 `protobuf:"bytes,9,opt,name=max_mem,json=maxMem,proto3" json:"max_mem,omitempty"`
-	MaxTime        string                 `protobuf:"bytes,10,opt,name=max_time,json=maxTime,proto3" json:"max_time,omitempty"`
+	MaxMem         string                 `protobuf:"bytes,9,opt,name=max_mem,json=maxMem,proto3" json:"max_mem,omitempty"`     // MB
+	MaxTime        string                 `protobuf:"bytes,10,opt,name=max_time,json=maxTime,proto3" json:"max_time,omitempty"` // ms
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -247,10 +247,12 @@ func (x *JudgeRequest) GetMaxTime() string {
 	return ""
 }
 
+// 简化的判题响应，类似LeetCode风格
 type JudgeResponse struct {
-	state   protoimpl.MessageState `protogen:"open.v1"`
-	Results []*Result              `protobuf:"bytes,1,rep,name=results,proto3" json:"results,omitempty"`
-	// 整体统计信息
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 如果全部通过，返回最优结果；如果有错误，返回错误结果
+	Result *Result `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
+	// 总体统计信息
 	Overall       *OverallStatistics `protobuf:"bytes,2,opt,name=overall,proto3" json:"overall,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -286,9 +288,9 @@ func (*JudgeResponse) Descriptor() ([]byte, []int) {
 	return file_pkg_rpc_proto_judge_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *JudgeResponse) GetResults() []*Result {
+func (x *JudgeResponse) GetResult() *Result {
 	if x != nil {
-		return x.Results
+		return x.Result
 	}
 	return nil
 }
@@ -300,197 +302,32 @@ func (x *JudgeResponse) GetOverall() *OverallStatistics {
 	return nil
 }
 
-type OverallStatistics struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	TotalTestcases uint32                 `protobuf:"varint,1,opt,name=total_testcases,json=totalTestcases,proto3" json:"total_testcases,omitempty"` // 总测试用例数
-	TotalCorrect   uint32                 `protobuf:"varint,2,opt,name=total_correct,json=totalCorrect,proto3" json:"total_correct,omitempty"`       // 通过的测试用例数
-	CompareResult  string                 `protobuf:"bytes,3,opt,name=compare_result,json=compareResult,proto3" json:"compare_result,omitempty"`     // 测试用例通过情况位串 "1110101"
-	// 时间统计
-	TotalTime int64 `protobuf:"varint,4,opt,name=total_time,json=totalTime,proto3" json:"total_time,omitempty"` // 总执行时间（毫秒）
-	MaxTime   int64 `protobuf:"varint,5,opt,name=max_time,json=maxTime,proto3" json:"max_time,omitempty"`       // 最大单个测试用例时间
-	AvgTime   int64 `protobuf:"varint,6,opt,name=avg_time,json=avgTime,proto3" json:"avg_time,omitempty"`       // 平均执行时间
-	// 内存统计
-	TotalMemory int64 `protobuf:"varint,7,opt,name=total_memory,json=totalMemory,proto3" json:"total_memory,omitempty"` // 总内存使用（字节）
-	MaxMemory   int64 `protobuf:"varint,8,opt,name=max_memory,json=maxMemory,proto3" json:"max_memory,omitempty"`       // 最大单个测试用例内存
-	AvgMemory   int64 `protobuf:"varint,9,opt,name=avg_memory,json=avgMemory,proto3" json:"avg_memory,omitempty"`       // 平均内存使用
-	// 整体状态
-	FinalStatus    Status `protobuf:"varint,10,opt,name=final_status,json=finalStatus,proto3,enum=rpc.Status" json:"final_status,omitempty"` // 最终判题状态
-	SubmissionId   string `protobuf:"bytes,11,opt,name=submission_id,json=submissionId,proto3" json:"submission_id,omitempty"`               // 提交ID
-	TaskFinishTime uint64 `protobuf:"varint,12,opt,name=task_finish_time,json=taskFinishTime,proto3" json:"task_finish_time,omitempty"`      // 任务完成时间戳
-	Finished       bool   `protobuf:"varint,13,opt,name=finished,proto3" json:"finished,omitempty"`                                          // 是否完成
-	// 性能排名（可选，需要历史数据支持）
-	OverallRuntimePercentile uint32 `protobuf:"varint,14,opt,name=overall_runtime_percentile,json=overallRuntimePercentile,proto3" json:"overall_runtime_percentile,omitempty"` // 整体运行时间百分位
-	OverallMemoryPercentile  uint32 `protobuf:"varint,15,opt,name=overall_memory_percentile,json=overallMemoryPercentile,proto3" json:"overall_memory_percentile,omitempty"`    // 整体内存百分位
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
-}
-
-func (x *OverallStatistics) Reset() {
-	*x = OverallStatistics{}
-	mi := &file_pkg_rpc_proto_judge_proto_msgTypes[2]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *OverallStatistics) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*OverallStatistics) ProtoMessage() {}
-
-func (x *OverallStatistics) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_rpc_proto_judge_proto_msgTypes[2]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use OverallStatistics.ProtoReflect.Descriptor instead.
-func (*OverallStatistics) Descriptor() ([]byte, []int) {
-	return file_pkg_rpc_proto_judge_proto_rawDescGZIP(), []int{2}
-}
-
-func (x *OverallStatistics) GetTotalTestcases() uint32 {
-	if x != nil {
-		return x.TotalTestcases
-	}
-	return 0
-}
-
-func (x *OverallStatistics) GetTotalCorrect() uint32 {
-	if x != nil {
-		return x.TotalCorrect
-	}
-	return 0
-}
-
-func (x *OverallStatistics) GetCompareResult() string {
-	if x != nil {
-		return x.CompareResult
-	}
-	return ""
-}
-
-func (x *OverallStatistics) GetTotalTime() int64 {
-	if x != nil {
-		return x.TotalTime
-	}
-	return 0
-}
-
-func (x *OverallStatistics) GetMaxTime() int64 {
-	if x != nil {
-		return x.MaxTime
-	}
-	return 0
-}
-
-func (x *OverallStatistics) GetAvgTime() int64 {
-	if x != nil {
-		return x.AvgTime
-	}
-	return 0
-}
-
-func (x *OverallStatistics) GetTotalMemory() int64 {
-	if x != nil {
-		return x.TotalMemory
-	}
-	return 0
-}
-
-func (x *OverallStatistics) GetMaxMemory() int64 {
-	if x != nil {
-		return x.MaxMemory
-	}
-	return 0
-}
-
-func (x *OverallStatistics) GetAvgMemory() int64 {
-	if x != nil {
-		return x.AvgMemory
-	}
-	return 0
-}
-
-func (x *OverallStatistics) GetFinalStatus() Status {
-	if x != nil {
-		return x.FinalStatus
-	}
-	return Status_status_accepted
-}
-
-func (x *OverallStatistics) GetSubmissionId() string {
-	if x != nil {
-		return x.SubmissionId
-	}
-	return ""
-}
-
-func (x *OverallStatistics) GetTaskFinishTime() uint64 {
-	if x != nil {
-		return x.TaskFinishTime
-	}
-	return 0
-}
-
-func (x *OverallStatistics) GetFinished() bool {
-	if x != nil {
-		return x.Finished
-	}
-	return false
-}
-
-func (x *OverallStatistics) GetOverallRuntimePercentile() uint32 {
-	if x != nil {
-		return x.OverallRuntimePercentile
-	}
-	return 0
-}
-
-func (x *OverallStatistics) GetOverallMemoryPercentile() uint32 {
-	if x != nil {
-		return x.OverallMemoryPercentile
-	}
-	return 0
-}
-
+// 最优结果或错误结果
 type Result struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Status         Status                 `protobuf:"varint,1,opt,name=status,proto3,enum=rpc.Status" json:"status,omitempty"`
-	TimeUsed       int64                  `protobuf:"varint,2,opt,name=TimeUsed,proto3" json:"TimeUsed,omitempty"`                                  // 时间使用（毫秒）
-	MemoryUsed     int64                  `protobuf:"varint,3,opt,name=MemoryUsed,proto3" json:"MemoryUsed,omitempty"`                              // 内存使用（字节）
-	Output         string                 `protobuf:"bytes,4,opt,name=output,proto3" json:"output,omitempty"`                                       // 实际输出
-	ExpectedOutput string                 `protobuf:"bytes,5,opt,name=expected_output,json=expectedOutput,proto3" json:"expected_output,omitempty"` // 期望输出
-	// 显示格式化信息
-	StatusRuntime string `protobuf:"bytes,6,opt,name=status_runtime,json=statusRuntime,proto3" json:"status_runtime,omitempty"` // 格式化运行时间 "150 ms"
-	StatusMemory  string `protobuf:"bytes,7,opt,name=status_memory,json=statusMemory,proto3" json:"status_memory,omitempty"`    // 格式化内存使用 "2.1 MB"
-	StatusMsg     string `protobuf:"bytes,8,opt,name=status_msg,json=statusMsg,proto3" json:"status_msg,omitempty"`             // 状态消息 "Accepted", "Wrong Answer"
-	// 性能比较
+	TimeUsed       int64                  `protobuf:"varint,2,opt,name=time_used,json=timeUsed,proto3" json:"time_used,omitempty"`                  // 执行时间（毫秒）
+	MemoryUsed     int64                  `protobuf:"varint,3,opt,name=memory_used,json=memoryUsed,proto3" json:"memory_used,omitempty"`            // 内存使用（字节）
+	Output         string                 `protobuf:"bytes,4,opt,name=output,proto3" json:"output,omitempty"`                                       // 实际输出（错误时显示）
+	ExpectedOutput string                 `protobuf:"bytes,5,opt,name=expected_output,json=expectedOutput,proto3" json:"expected_output,omitempty"` // 期望输出（错误时显示）
+	// 格式化显示信息
+	StatusRuntime string `protobuf:"bytes,6,opt,name=status_runtime,json=statusRuntime,proto3" json:"status_runtime,omitempty"` // "0 ms" 或 "150 ms"
+	StatusMemory  string `protobuf:"bytes,7,opt,name=status_memory,json=statusMemory,proto3" json:"status_memory,omitempty"`    // "3.4 MB"
+	StatusMsg     string `protobuf:"bytes,8,opt,name=status_msg,json=statusMsg,proto3" json:"status_msg,omitempty"`             // "Accepted", "Wrong Answer"
+	// 性能百分位（仅AC时有意义）
 	RuntimePercentile uint32 `protobuf:"varint,9,opt,name=runtime_percentile,json=runtimePercentile,proto3" json:"runtime_percentile,omitempty"` // 运行时间百分位 (0-100)
 	MemoryPercentile  uint32 `protobuf:"varint,10,opt,name=memory_percentile,json=memoryPercentile,proto3" json:"memory_percentile,omitempty"`   // 内存百分位 (0-100)
-	// 错误信息
-	ErrorMessage string `protobuf:"bytes,11,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"` // 详细错误信息
-	CompileError string `protobuf:"bytes,12,opt,name=compile_error,json=compileError,proto3" json:"compile_error,omitempty"` // 编译错误详情
-	ExitCode     int32  `protobuf:"varint,13,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`            // 程序退出码
-	// 测试用例信息
-	TestcaseInput  string `protobuf:"bytes,14,opt,name=testcase_input,json=testcaseInput,proto3" json:"testcase_input,omitempty"`       // 当前测试用例输入
-	IsLastTestcase bool   `protobuf:"varint,15,opt,name=is_last_testcase,json=isLastTestcase,proto3" json:"is_last_testcase,omitempty"` // 是否是最后一个测试用例
-	// 执行详情
-	CompileTime   int64  `protobuf:"varint,16,opt,name=compile_time,json=compileTime,proto3" json:"compile_time,omitempty"` // 编译时间（毫秒）
-	ExecutionId   string `protobuf:"bytes,17,opt,name=execution_id,json=executionId,proto3" json:"execution_id,omitempty"`  // 执行ID，用于调试
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// 错误信息（仅错误时填充）
+	ErrorMessage        string `protobuf:"bytes,11,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`                         // 详细错误信息
+	TestcaseInput       string `protobuf:"bytes,12,opt,name=testcase_input,json=testcaseInput,proto3" json:"testcase_input,omitempty"`                      // 失败的测试用例输入
+	FailedTestcaseIndex int32  `protobuf:"varint,13,opt,name=failed_testcase_index,json=failedTestcaseIndex,proto3" json:"failed_testcase_index,omitempty"` // 失败的测试用例索引（从0开始）
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *Result) Reset() {
 	*x = Result{}
-	mi := &file_pkg_rpc_proto_judge_proto_msgTypes[3]
+	mi := &file_pkg_rpc_proto_judge_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -502,7 +339,7 @@ func (x *Result) String() string {
 func (*Result) ProtoMessage() {}
 
 func (x *Result) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_rpc_proto_judge_proto_msgTypes[3]
+	mi := &file_pkg_rpc_proto_judge_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -515,7 +352,7 @@ func (x *Result) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Result.ProtoReflect.Descriptor instead.
 func (*Result) Descriptor() ([]byte, []int) {
-	return file_pkg_rpc_proto_judge_proto_rawDescGZIP(), []int{3}
+	return file_pkg_rpc_proto_judge_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Result) GetStatus() Status {
@@ -595,20 +432,6 @@ func (x *Result) GetErrorMessage() string {
 	return ""
 }
 
-func (x *Result) GetCompileError() string {
-	if x != nil {
-		return x.CompileError
-	}
-	return ""
-}
-
-func (x *Result) GetExitCode() int32 {
-	if x != nil {
-		return x.ExitCode
-	}
-	return 0
-}
-
 func (x *Result) GetTestcaseInput() string {
 	if x != nil {
 		return x.TestcaseInput
@@ -616,25 +439,147 @@ func (x *Result) GetTestcaseInput() string {
 	return ""
 }
 
-func (x *Result) GetIsLastTestcase() bool {
+func (x *Result) GetFailedTestcaseIndex() int32 {
 	if x != nil {
-		return x.IsLastTestcase
-	}
-	return false
-}
-
-func (x *Result) GetCompileTime() int64 {
-	if x != nil {
-		return x.CompileTime
+		return x.FailedTestcaseIndex
 	}
 	return 0
 }
 
-func (x *Result) GetExecutionId() string {
+// 总体统计信息
+type OverallStatistics struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	TotalTestcases uint32                 `protobuf:"varint,1,opt,name=total_testcases,json=totalTestcases,proto3" json:"total_testcases,omitempty"` // 总测试用例数
+	TotalCorrect   uint32                 `protobuf:"varint,2,opt,name=total_correct,json=totalCorrect,proto3" json:"total_correct,omitempty"`       // 通过的测试用例数
+	CompareResult  string                 `protobuf:"bytes,3,opt,name=compare_result,json=compareResult,proto3" json:"compare_result,omitempty"`     // 测试结果："1111..." 或 "110X"（X表示在此失败）
+	// 时间和内存统计（仅全部AC时有效）
+	TotalTime int64 `protobuf:"varint,4,opt,name=total_time,json=totalTime,proto3" json:"total_time,omitempty"` // 总执行时间（毫秒）
+	MaxMemory int64 `protobuf:"varint,5,opt,name=max_memory,json=maxMemory,proto3" json:"max_memory,omitempty"` // 最大内存使用（字节）
+	AvgMemory int64 `protobuf:"varint,6,opt,name=avg_memory,json=avgMemory,proto3" json:"avg_memory,omitempty"` // 平均内存使用（字节）
+	// 元数据
+	FinalStatus    Status `protobuf:"varint,7,opt,name=final_status,json=finalStatus,proto3,enum=rpc.Status" json:"final_status,omitempty"` // 最终状态
+	SubmissionId   string `protobuf:"bytes,8,opt,name=submission_id,json=submissionId,proto3" json:"submission_id,omitempty"`               // 提交ID
+	TaskFinishTime uint64 `protobuf:"varint,9,opt,name=task_finish_time,json=taskFinishTime,proto3" json:"task_finish_time,omitempty"`      // 完成时间戳
+	Finished       bool   `protobuf:"varint,10,opt,name=finished,proto3" json:"finished,omitempty"`                                         // 是否完成
+	// 整体性能百分位（基于最优结果）
+	OverallRuntimePercentile uint32 `protobuf:"varint,11,opt,name=overall_runtime_percentile,json=overallRuntimePercentile,proto3" json:"overall_runtime_percentile,omitempty"` // 整体运行时间百分位
+	OverallMemoryPercentile  uint32 `protobuf:"varint,12,opt,name=overall_memory_percentile,json=overallMemoryPercentile,proto3" json:"overall_memory_percentile,omitempty"`    // 整体内存百分位
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
+}
+
+func (x *OverallStatistics) Reset() {
+	*x = OverallStatistics{}
+	mi := &file_pkg_rpc_proto_judge_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OverallStatistics) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OverallStatistics) ProtoMessage() {}
+
+func (x *OverallStatistics) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_rpc_proto_judge_proto_msgTypes[3]
 	if x != nil {
-		return x.ExecutionId
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OverallStatistics.ProtoReflect.Descriptor instead.
+func (*OverallStatistics) Descriptor() ([]byte, []int) {
+	return file_pkg_rpc_proto_judge_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *OverallStatistics) GetTotalTestcases() uint32 {
+	if x != nil {
+		return x.TotalTestcases
+	}
+	return 0
+}
+
+func (x *OverallStatistics) GetTotalCorrect() uint32 {
+	if x != nil {
+		return x.TotalCorrect
+	}
+	return 0
+}
+
+func (x *OverallStatistics) GetCompareResult() string {
+	if x != nil {
+		return x.CompareResult
 	}
 	return ""
+}
+
+func (x *OverallStatistics) GetTotalTime() int64 {
+	if x != nil {
+		return x.TotalTime
+	}
+	return 0
+}
+
+func (x *OverallStatistics) GetMaxMemory() int64 {
+	if x != nil {
+		return x.MaxMemory
+	}
+	return 0
+}
+
+func (x *OverallStatistics) GetAvgMemory() int64 {
+	if x != nil {
+		return x.AvgMemory
+	}
+	return 0
+}
+
+func (x *OverallStatistics) GetFinalStatus() Status {
+	if x != nil {
+		return x.FinalStatus
+	}
+	return Status_status_accepted
+}
+
+func (x *OverallStatistics) GetSubmissionId() string {
+	if x != nil {
+		return x.SubmissionId
+	}
+	return ""
+}
+
+func (x *OverallStatistics) GetTaskFinishTime() uint64 {
+	if x != nil {
+		return x.TaskFinishTime
+	}
+	return 0
+}
+
+func (x *OverallStatistics) GetFinished() bool {
+	if x != nil {
+		return x.Finished
+	}
+	return false
+}
+
+func (x *OverallStatistics) GetOverallRuntimePercentile() uint32 {
+	if x != nil {
+		return x.OverallRuntimePercentile
+	}
+	return 0
+}
+
+func (x *OverallStatistics) GetOverallMemoryPercentile() uint32 {
+	if x != nil {
+		return x.OverallMemoryPercentile
+	}
+	return 0
 }
 
 var File_pkg_rpc_proto_judge_proto protoreflect.FileDescriptor
@@ -654,36 +599,15 @@ const file_pkg_rpc_proto_judge_proto_rawDesc = "" +
 	"\x06output\x18\b \x03(\tR\x06output\x12\x17\n" +
 	"\amax_mem\x18\t \x01(\tR\x06maxMem\x12\x19\n" +
 	"\bmax_time\x18\n" +
-	" \x01(\tR\amaxTime\"h\n" +
-	"\rJudgeResponse\x12%\n" +
-	"\aresults\x18\x01 \x03(\v2\v.rpc.ResultR\aresults\x120\n" +
-	"\aoverall\x18\x02 \x01(\v2\x16.rpc.OverallStatisticsR\aoverall\"\xd3\x04\n" +
-	"\x11OverallStatistics\x12'\n" +
-	"\x0ftotal_testcases\x18\x01 \x01(\rR\x0etotalTestcases\x12#\n" +
-	"\rtotal_correct\x18\x02 \x01(\rR\ftotalCorrect\x12%\n" +
-	"\x0ecompare_result\x18\x03 \x01(\tR\rcompareResult\x12\x1d\n" +
-	"\n" +
-	"total_time\x18\x04 \x01(\x03R\ttotalTime\x12\x19\n" +
-	"\bmax_time\x18\x05 \x01(\x03R\amaxTime\x12\x19\n" +
-	"\bavg_time\x18\x06 \x01(\x03R\aavgTime\x12!\n" +
-	"\ftotal_memory\x18\a \x01(\x03R\vtotalMemory\x12\x1d\n" +
-	"\n" +
-	"max_memory\x18\b \x01(\x03R\tmaxMemory\x12\x1d\n" +
-	"\n" +
-	"avg_memory\x18\t \x01(\x03R\tavgMemory\x12.\n" +
-	"\ffinal_status\x18\n" +
-	" \x01(\x0e2\v.rpc.StatusR\vfinalStatus\x12#\n" +
-	"\rsubmission_id\x18\v \x01(\tR\fsubmissionId\x12(\n" +
-	"\x10task_finish_time\x18\f \x01(\x04R\x0etaskFinishTime\x12\x1a\n" +
-	"\bfinished\x18\r \x01(\bR\bfinished\x12<\n" +
-	"\x1aoverall_runtime_percentile\x18\x0e \x01(\rR\x18overallRuntimePercentile\x12:\n" +
-	"\x19overall_memory_percentile\x18\x0f \x01(\rR\x17overallMemoryPercentile\"\xef\x04\n" +
+	" \x01(\tR\amaxTime\"f\n" +
+	"\rJudgeResponse\x12#\n" +
+	"\x06result\x18\x01 \x01(\v2\v.rpc.ResultR\x06result\x120\n" +
+	"\aoverall\x18\x02 \x01(\v2\x16.rpc.OverallStatisticsR\aoverall\"\xf3\x03\n" +
 	"\x06Result\x12#\n" +
-	"\x06status\x18\x01 \x01(\x0e2\v.rpc.StatusR\x06status\x12\x1a\n" +
-	"\bTimeUsed\x18\x02 \x01(\x03R\bTimeUsed\x12\x1e\n" +
-	"\n" +
-	"MemoryUsed\x18\x03 \x01(\x03R\n" +
-	"MemoryUsed\x12\x16\n" +
+	"\x06status\x18\x01 \x01(\x0e2\v.rpc.StatusR\x06status\x12\x1b\n" +
+	"\ttime_used\x18\x02 \x01(\x03R\btimeUsed\x12\x1f\n" +
+	"\vmemory_used\x18\x03 \x01(\x03R\n" +
+	"memoryUsed\x12\x16\n" +
 	"\x06output\x18\x04 \x01(\tR\x06output\x12'\n" +
 	"\x0fexpected_output\x18\x05 \x01(\tR\x0eexpectedOutput\x12%\n" +
 	"\x0estatus_runtime\x18\x06 \x01(\tR\rstatusRuntime\x12#\n" +
@@ -693,13 +617,26 @@ const file_pkg_rpc_proto_judge_proto_rawDesc = "" +
 	"\x12runtime_percentile\x18\t \x01(\rR\x11runtimePercentile\x12+\n" +
 	"\x11memory_percentile\x18\n" +
 	" \x01(\rR\x10memoryPercentile\x12#\n" +
-	"\rerror_message\x18\v \x01(\tR\ferrorMessage\x12#\n" +
-	"\rcompile_error\x18\f \x01(\tR\fcompileError\x12\x1b\n" +
-	"\texit_code\x18\r \x01(\x05R\bexitCode\x12%\n" +
-	"\x0etestcase_input\x18\x0e \x01(\tR\rtestcaseInput\x12(\n" +
-	"\x10is_last_testcase\x18\x0f \x01(\bR\x0eisLastTestcase\x12!\n" +
-	"\fcompile_time\x18\x10 \x01(\x03R\vcompileTime\x12!\n" +
-	"\fexecution_id\x18\x11 \x01(\tR\vexecutionId*1\n" +
+	"\rerror_message\x18\v \x01(\tR\ferrorMessage\x12%\n" +
+	"\x0etestcase_input\x18\f \x01(\tR\rtestcaseInput\x122\n" +
+	"\x15failed_testcase_index\x18\r \x01(\x05R\x13failedTestcaseIndex\"\xfa\x03\n" +
+	"\x11OverallStatistics\x12'\n" +
+	"\x0ftotal_testcases\x18\x01 \x01(\rR\x0etotalTestcases\x12#\n" +
+	"\rtotal_correct\x18\x02 \x01(\rR\ftotalCorrect\x12%\n" +
+	"\x0ecompare_result\x18\x03 \x01(\tR\rcompareResult\x12\x1d\n" +
+	"\n" +
+	"total_time\x18\x04 \x01(\x03R\ttotalTime\x12\x1d\n" +
+	"\n" +
+	"max_memory\x18\x05 \x01(\x03R\tmaxMemory\x12\x1d\n" +
+	"\n" +
+	"avg_memory\x18\x06 \x01(\x03R\tavgMemory\x12.\n" +
+	"\ffinal_status\x18\a \x01(\x0e2\v.rpc.StatusR\vfinalStatus\x12#\n" +
+	"\rsubmission_id\x18\b \x01(\tR\fsubmissionId\x12(\n" +
+	"\x10task_finish_time\x18\t \x01(\x04R\x0etaskFinishTime\x12\x1a\n" +
+	"\bfinished\x18\n" +
+	" \x01(\bR\bfinished\x12<\n" +
+	"\x1aoverall_runtime_percentile\x18\v \x01(\rR\x18overallRuntimePercentile\x12:\n" +
+	"\x19overall_memory_percentile\x18\f \x01(\rR\x17overallMemoryPercentile*1\n" +
 	"\bLanguage\x12\x06\n" +
 	"\x02go\x10\x00\x12\b\n" +
 	"\x04java\x10\x01\x12\a\n" +
@@ -735,15 +672,15 @@ var file_pkg_rpc_proto_judge_proto_goTypes = []any{
 	(Status)(0),               // 1: rpc.Status
 	(*JudgeRequest)(nil),      // 2: rpc.JudgeRequest
 	(*JudgeResponse)(nil),     // 3: rpc.JudgeResponse
-	(*OverallStatistics)(nil), // 4: rpc.OverallStatistics
-	(*Result)(nil),            // 5: rpc.Result
+	(*Result)(nil),            // 4: rpc.Result
+	(*OverallStatistics)(nil), // 5: rpc.OverallStatistics
 }
 var file_pkg_rpc_proto_judge_proto_depIdxs = []int32{
 	0, // 0: rpc.JudgeRequest.language:type_name -> rpc.Language
-	5, // 1: rpc.JudgeResponse.results:type_name -> rpc.Result
-	4, // 2: rpc.JudgeResponse.overall:type_name -> rpc.OverallStatistics
-	1, // 3: rpc.OverallStatistics.final_status:type_name -> rpc.Status
-	1, // 4: rpc.Result.status:type_name -> rpc.Status
+	4, // 1: rpc.JudgeResponse.result:type_name -> rpc.Result
+	5, // 2: rpc.JudgeResponse.overall:type_name -> rpc.OverallStatistics
+	1, // 3: rpc.Result.status:type_name -> rpc.Status
+	1, // 4: rpc.OverallStatistics.final_status:type_name -> rpc.Status
 	2, // 5: rpc.JudgeService.Judge:input_type -> rpc.JudgeRequest
 	3, // 6: rpc.JudgeService.Judge:output_type -> rpc.JudgeResponse
 	6, // [6:7] is the sub-list for method output_type

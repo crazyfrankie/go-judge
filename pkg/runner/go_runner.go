@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"sync"
 	"text/template"
 	"time"
 
@@ -40,82 +39,132 @@ func (g *GoRunner) Run(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeRe
 		}
 	}
 
-	var wg sync.WaitGroup
-	results := make([]*rpc.Result, len(req.GetInput()))
+	var bestTimeResult *rpc.Result
+	var bestMemoryResult *rpc.Result
+	var totalTime int64
+	var totalMemory int64
+	var maxMemory int64
 
 	for i, input := range req.GetInput() {
-		wg.Add(1)
-		go func(index int, testInput string) {
-			defer wg.Done()
+		testWorkDir := fmt.Sprintf("%s/test_%d", baseDir, i)
 
-			testWorkDir := fmt.Sprintf("%s/test_%d", baseDir, index)
+		expectedOutput := ""
+		if i < len(req.GetOutput()) {
+			expectedOutput = req.GetOutput()[i]
+		}
 
-			expectedOutput := ""
-			if index < len(req.GetOutput()) {
-				expectedOutput = req.GetOutput()[index]
-			}
+		// 执行测试用例
+		testResult, err := judgeTestCase(ctx, req.GetFullTemplate(), req.GetCode(),
+			req.GetTypeDefinition(), input, expectedOutput, limit, testWorkDir)
 
-			testResult, err := judgeTestCase(ctx, req.GetFullTemplate(), req.GetCode(),
-				req.GetTypeDefinition(), testInput, expectedOutput, limit, testWorkDir)
+		result := &rpc.Result{
+			TimeUsed:       testResult.TimeUsed,
+			MemoryUsed:     testResult.MemoryUsed,
+			Output:         testResult.Output,
+			ExpectedOutput: testResult.ExpectedOutput,
 
-			result := &rpc.Result{
-				TimeUsed:       testResult.TimeUsed,
-				MemoryUsed:     testResult.MemoryUsed,
-				Output:         testResult.Output,
-				ExpectedOutput: testResult.ExpectedOutput,
+			// 格式化显示信息
+			StatusRuntime: formatRuntime(testResult.TimeUsed),
+			StatusMemory:  formatMemory(testResult.MemoryUsed),
+			StatusMsg:     getStatusMessage(testResult.Status),
 
-				// formate status info
-				StatusRuntime: formatRuntime(testResult.TimeUsed),
-				StatusMemory:  formatMemory(testResult.MemoryUsed),
-				StatusMsg:     getStatusMessage(testResult.Status),
+			// 性能百分位
+			RuntimePercentile: calculatePercentile(testResult.TimeUsed, false),
+			MemoryPercentile:  calculatePercentile(testResult.MemoryUsed, true),
 
-				RuntimePercentile: calculatePercentile(testResult.TimeUsed, false),
-				MemoryPercentile:  calculatePercentile(testResult.MemoryUsed, true), // 错误信息
-				ErrorMessage:      testResult.ErrorMessage,
-				TestcaseInput:     testInput,
-				IsLastTestcase:    index == len(req.GetInput())-1,
-				ExecutionId:       fmt.Sprintf("%d_%d_%d", req.GetProblemId(), req.GetUid(), index),
-			}
+			// 错误信息
+			ErrorMessage:  testResult.ErrorMessage,
+			TestcaseInput: input,
+		}
 
-			if testResult.ExecutionResult != nil {
-				result.ExitCode = int32(testResult.ExecutionResult.ExitCode)
-				if testResult.ExecutionResult.ErrorOutput != "" {
-					result.CompileError = testResult.ExecutionResult.ErrorOutput
+		// 如果有执行结果详情，将错误信息添加到ErrorMessage
+		if testResult.ExecutionResult != nil {
+			if testResult.ExecutionResult.ErrorOutput != "" {
+				if result.ErrorMessage != "" {
+					result.ErrorMessage += "\n" + testResult.ExecutionResult.ErrorOutput
+				} else {
+					result.ErrorMessage = testResult.ExecutionResult.ErrorOutput
 				}
 			}
+		}
 
-			switch testResult.Status {
-			case types.StatusAccepted:
-				result.Status = rpc.Status_status_accepted
-			case types.StatusWrongAnswer:
-				result.Status = rpc.Status_status_wrong_answer
-			case types.StatusTimeLimitExceeded:
-				result.Status = rpc.Status_status_time_limit_exceeded
-			case types.StatusMemoryLimitExceeded:
-				result.Status = rpc.Status_status_memory_limit_exceeded
-			case types.StatusRuntimeError:
-				result.Status = rpc.Status_status_runtime_error
-			case types.StatusCompilationError:
-				result.Status = rpc.Status_status_compilation_error
-			default:
-				result.Status = rpc.Status_status_runtime_error
-			}
+		switch testResult.Status {
+		case types.StatusAccepted:
+			result.Status = rpc.Status_status_accepted
+		case types.StatusWrongAnswer:
+			result.Status = rpc.Status_status_wrong_answer
+		case types.StatusTimeLimitExceeded:
+			result.Status = rpc.Status_status_time_limit_exceeded
+		case types.StatusMemoryLimitExceeded:
+			result.Status = rpc.Status_status_memory_limit_exceeded
+		case types.StatusRuntimeError:
+			result.Status = rpc.Status_status_runtime_error
+		case types.StatusCompilationError:
+			result.Status = rpc.Status_status_compilation_error
+		default:
+			result.Status = rpc.Status_status_runtime_error
+		}
 
-			if err != nil {
-				result.Status = rpc.Status_status_runtime_error
-				result.Output = fmt.Sprintf("Internal error: %v", err)
-			}
+		if err != nil {
+			result.Status = rpc.Status_status_runtime_error
+			result.Output = fmt.Sprintf("Internal error: %v", err)
+		}
 
-			results[index] = result
-		}(i, input)
+		// 如果有错误，立即返回错误结果，不执行后续测试用例
+		if result.Status != rpc.Status_status_accepted {
+			result.FailedTestcaseIndex = int32(i) // 设置失败的测试用例索引
+			return &rpc.JudgeResponse{
+				Result: result,
+				Overall: &rpc.OverallStatistics{
+					TotalTestcases: uint32(len(req.GetInput())),
+					TotalCorrect:   uint32(i),                    // 失败前通过的测试用例数
+					CompareResult:  strings.Repeat("1", i) + "X", // X表示在此处失败
+					FinalStatus:    result.Status,
+					SubmissionId:   fmt.Sprintf("%d_%d_%d", req.GetProblemId(), req.GetUid(), time.Now().Unix()),
+					TaskFinishTime: uint64(time.Now().UnixMilli()),
+					Finished:       true,
+				},
+			}, nil
+		}
+
+		// 累计统计信息
+		totalTime += testResult.TimeUsed
+		totalMemory += testResult.MemoryUsed
+		if testResult.MemoryUsed > maxMemory {
+			maxMemory = testResult.MemoryUsed
+		}
+
+		// 记录最优结果
+		if bestTimeResult == nil || testResult.TimeUsed < bestTimeResult.TimeUsed {
+			bestTimeResult = result
+		}
+		if bestMemoryResult == nil || testResult.MemoryUsed < bestMemoryResult.MemoryUsed {
+			bestMemoryResult = result
+		}
 	}
 
-	wg.Wait()
+	bestResult := bestTimeResult
+	if bestMemoryResult != nil && bestMemoryResult.MemoryUsed < bestResult.MemoryUsed {
+		bestResult = bestMemoryResult
+	}
 
-	overall := calculateOverallStatistics(results, req)
+	overall := &rpc.OverallStatistics{
+		TotalTestcases:           uint32(len(req.GetInput())),
+		TotalCorrect:             uint32(len(req.GetInput())),
+		CompareResult:            strings.Repeat("1", len(req.GetInput())),
+		TotalTime:                totalTime,
+		MaxMemory:                maxMemory,
+		AvgMemory:                totalMemory / int64(len(req.GetInput())),
+		FinalStatus:              rpc.Status_status_accepted,
+		SubmissionId:             fmt.Sprintf("%d_%d_%d", req.GetProblemId(), req.GetUid(), time.Now().Unix()),
+		TaskFinishTime:           uint64(time.Now().UnixMilli()),
+		Finished:                 true,
+		OverallRuntimePercentile: bestResult.RuntimePercentile,
+		OverallMemoryPercentile:  bestResult.MemoryPercentile,
+	}
 
 	return &rpc.JudgeResponse{
-		Results: results,
+		Result:  bestResult,
 		Overall: overall,
 	}, nil
 }
@@ -170,10 +219,8 @@ func judgeTestCase(ctx context.Context, fullTemp string, userCode string, typesD
 	result.MemoryUsed = execResult.MemoryUsed
 	result.Output = execResult.Output
 
-	// Determining execution status
 	if execResult.ExitCode != 0 {
 		if execResult.ErrorOutput != "" {
-			// Check if it is a compilation error
 			if strings.Contains(execResult.ErrorOutput, "compile") || strings.Contains(execResult.ErrorOutput, "syntax") {
 				result.Status = types.StatusCompilationError
 				result.ErrorMessage = execResult.ErrorOutput
@@ -230,17 +277,14 @@ func compareOutput(actual, expected string, config *types.CompareConfig) bool {
 
 	actualProcessed := actual
 	expectedProcessed := expected
-
 	if config.IgnoreCase {
 		actualProcessed = strings.ToLower(actualProcessed)
 		expectedProcessed = strings.ToLower(expectedProcessed)
 	}
-
 	if config.IgnoreWhitespace {
 		actualProcessed = strings.Join(strings.Fields(actualProcessed), " ")
 		expectedProcessed = strings.Join(strings.Fields(expectedProcessed), " ")
 	}
-
 	if config.Precision >= 0 {
 		return compareFloatOutput(actualProcessed, expectedProcessed, config.Precision)
 	}
@@ -279,74 +323,6 @@ func extractNumbers(s string) []float64 {
 	}
 
 	return numbers
-}
-
-func calculateOverallStatistics(results []*rpc.Result, req *rpc.JudgeRequest) *rpc.OverallStatistics {
-	if len(results) == 0 {
-		return &rpc.OverallStatistics{}
-	}
-
-	stats := &rpc.OverallStatistics{
-		TotalTestcases: uint32(len(results)),
-		SubmissionId:   fmt.Sprintf("%d_%d_%d", req.GetProblemId(), req.GetUid(), time.Now().Unix()),
-		TaskFinishTime: uint64(time.Now().UnixMilli()),
-		Finished:       true,
-	}
-
-	var compareResultBuilder strings.Builder
-	var totalTime, maxTime, totalMemory, maxMemory int64
-	var correctCount uint32
-	var finalStatus = rpc.Status_status_accepted
-
-	for _, result := range results {
-		// Statistics on adoption
-		if result.Status == rpc.Status_status_accepted {
-			compareResultBuilder.WriteString("1")
-			correctCount++
-		} else {
-			compareResultBuilder.WriteString("0")
-			// Update final status (priority: compile errors > runtime errors > other errors)
-			if finalStatus == rpc.Status_status_accepted ||
-				(result.Status == rpc.Status_status_compilation_error) ||
-				(result.Status == rpc.Status_status_runtime_error && finalStatus != rpc.Status_status_compilation_error) {
-				finalStatus = result.Status
-			}
-		}
-
-		// time statics
-		totalTime += result.TimeUsed
-		if result.TimeUsed > maxTime {
-			maxTime = result.TimeUsed
-		}
-
-		// memory statics
-		totalMemory += result.MemoryUsed
-		if result.MemoryUsed > maxMemory {
-			maxMemory = result.MemoryUsed
-		}
-	}
-
-	stats.TotalCorrect = correctCount
-	stats.CompareResult = compareResultBuilder.String()
-	stats.FinalStatus = finalStatus
-
-	stats.TotalTime = totalTime
-	stats.MaxTime = maxTime
-	if len(results) > 0 {
-		stats.AvgTime = totalTime / int64(len(results))
-	}
-
-	stats.TotalMemory = totalMemory
-	stats.MaxMemory = maxMemory
-	if len(results) > 0 {
-		stats.AvgMemory = totalMemory / int64(len(results))
-	}
-
-	// Overall performance percentile (based on worst performance)
-	stats.OverallRuntimePercentile = calculatePercentile(maxTime, false)
-	stats.OverallMemoryPercentile = calculatePercentile(maxMemory, true)
-
-	return stats
 }
 
 func parseTemplate(fullTemp string, userCode string, types string, input string, workdir string) error {
@@ -511,14 +487,12 @@ func parseStatsFile(workdir string) (*types.ExecutionResult, error) {
 		}
 	}
 
-	// Parse memory usage (bytes)
 	if maxMem, exists := stats["Maximum resident set size (kbytes)"]; exists {
 		if kb, err := strconv.ParseInt(maxMem, 10, 64); err == nil {
-			result.MemoryUsed = kb * 1024
+			result.MemoryUsed = kb * 1024 // 转换为字节
 		}
 	}
 
-	// Read exit code
 	exitCodePath := fmt.Sprintf("%s/exitcode.txt", workdir)
 	if exitCodeData, err := os.ReadFile(exitCodePath); err == nil {
 		if exitCode, err := strconv.Atoi(strings.TrimSpace(string(exitCodeData))); err == nil {
@@ -526,13 +500,11 @@ func parseStatsFile(workdir string) (*types.ExecutionResult, error) {
 		}
 	}
 
-	// Read program output
 	resultPath := fmt.Sprintf("%s/result.txt", workdir)
 	if resultData, err := os.ReadFile(resultPath); err == nil {
 		result.Output = strings.TrimSpace(string(resultData))
 	}
 
-	// Read error output
 	errorPath := fmt.Sprintf("%s/error.txt", workdir)
 	if errorData, err := os.ReadFile(errorPath); err == nil {
 		result.ErrorOutput = strings.TrimSpace(string(errorData))

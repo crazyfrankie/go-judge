@@ -57,26 +57,28 @@ func (j *JudgeService) Judge(ctx context.Context, req *rpc.JudgeRequest) (*rpc.J
 
 // 记录评测结果（可选）
 func (j *JudgeService) logJudgeResult(req *rpc.JudgeRequest, resp *rpc.JudgeResponse) {
-	// 计算总体统计
-	var totalCorrect, totalTests int
-	var maxTime, maxMemory int64
+	// 使用overall统计信息
+	if resp.Overall != nil {
+		overall := resp.Overall
+		fmt.Printf("Judge completed - Problem: %d, User: %d, Total: %d, Correct: %d, Status: %v\n",
+			req.GetProblemId(), req.GetUid(), overall.TotalTestcases, overall.TotalCorrect, overall.FinalStatus)
 
-	for _, result := range resp.GetResults() {
-		totalTests++
-		if result.Status == rpc.Status_status_accepted {
-			totalCorrect++
-		}
-		if result.TimeUsed > maxTime {
-			maxTime = result.TimeUsed
-		}
-		if result.MemoryUsed > maxMemory {
-			maxMemory = result.MemoryUsed
+		if overall.FinalStatus == rpc.Status_status_accepted {
+			fmt.Printf("Performance - TotalTime: %dms, MaxMemory: %d bytes, AvgMemory: %d bytes\n",
+				overall.TotalTime, overall.MaxMemory, overall.AvgMemory)
 		}
 	}
 
-	// 这里可以记录到日志或数据库
-	fmt.Printf("Judge completed - Problem: %d, User: %d, Total: %d, Correct: %d, MaxTime: %dms, MaxMemory: %d bytes\n",
-		req.GetProblemId(), req.GetUid(), totalTests, totalCorrect, maxTime, maxMemory)
+	// 记录单个结果信息
+	if resp.Result != nil {
+		result := resp.Result
+		fmt.Printf("Result - Status: %v, Time: %dms, Memory: %d bytes\n",
+			result.Status, result.TimeUsed, result.MemoryUsed)
+
+		if result.Status != rpc.Status_status_accepted && result.ErrorMessage != "" {
+			fmt.Printf("Error: %s\n", result.ErrorMessage)
+		}
+	}
 }
 
 // 创建详细的评测结果
