@@ -108,15 +108,19 @@ func (g *GoRunner) RunWithDocker(ctx context.Context, req *rpc.JudgeRequest) (*r
 		result := &rpc.Result{
 			TimeUsed:          testResult.TimeUsed,
 			MemoryUsed:        testResult.MemoryUsed,
-			Output:            testResult.Output,
-			ExpectedOutput:    testResult.ExpectedOutput,
 			StatusRuntime:     formatRuntime(testResult.TimeUsed),
 			StatusMemory:      formatMemory(testResult.MemoryUsed),
 			StatusMsg:         getStatusMessage(testResult.Status),
 			RuntimePercentile: calculatePercentile(testResult.TimeUsed, false),
 			MemoryPercentile:  calculatePercentile(testResult.MemoryUsed, true),
-			ErrorMessage:      testResult.ErrorMessage,
 			TestcaseInput:     input,
+		}
+
+		// 只有在出错时才返回输出和错误信息
+		if testResult.Status != types.StatusAccepted {
+			result.Output = testResult.Output
+			result.ExpectedOutput = testResult.ExpectedOutput
+			result.ErrorMessage = testResult.ErrorMessage
 		}
 
 		switch testResult.Status {
@@ -265,15 +269,19 @@ func (g *GoRunner) RunWithSandbox(ctx context.Context, req *rpc.JudgeRequest) (*
 		result := &rpc.Result{
 			TimeUsed:          testResult.TimeUsed,
 			MemoryUsed:        testResult.MemoryUsed,
-			Output:            testResult.Output,
-			ExpectedOutput:    testResult.ExpectedOutput,
 			StatusRuntime:     formatRuntime(testResult.TimeUsed),
 			StatusMemory:      formatMemory(testResult.MemoryUsed),
 			StatusMsg:         getStatusMessage(testResult.Status),
 			RuntimePercentile: calculatePercentile(testResult.TimeUsed, false),
 			MemoryPercentile:  calculatePercentile(testResult.MemoryUsed, true),
-			ErrorMessage:      testResult.ErrorMessage,
 			TestcaseInput:     input,
+		}
+
+		// 只有在出错时才返回输出和错误信息
+		if testResult.Status != types.StatusAccepted {
+			result.Output = testResult.Output
+			result.ExpectedOutput = testResult.ExpectedOutput
+			result.ErrorMessage = testResult.ErrorMessage
 		}
 
 		switch testResult.Status {
