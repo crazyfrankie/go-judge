@@ -80,7 +80,7 @@ func (j *JudgeService) createDetailedResult(results []*types.TestCaseResult) *ty
 	if len(results) == 0 {
 		return &types.JudgeResult{
 			Status:       types.StatusRuntimeError,
-			ErrorMessage: "No test cases found",
+			ErrorMessage: "No judge cases found",
 		}
 	}
 

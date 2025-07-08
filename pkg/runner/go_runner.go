@@ -3,7 +3,6 @@ package runner
 import (
 	"context"
 	"fmt"
-	"github.com/crazyfrankie/go-judge"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -16,21 +15,10 @@ import (
 
 	"github.com/crazyfrankie/go-judge/pkg/rpc"
 	"github.com/crazyfrankie/go-judge/pkg/runner/docker"
+	"github.com/crazyfrankie/go-judge/pkg/runner/sandbox"
 	"github.com/crazyfrankie/go-judge/pkg/types"
 	"github.com/crazyfrankie/go-judge/pkg/utils"
 )
-
-// init handles the sandbox-init command
-func init() {
-	// Check if this is a sandbox initialization process
-	if len(os.Args) > 1 && os.Args[1] == "sandbox-init" {
-		if err := container_judge.ContainerInitProcess(); err != nil {
-			fmt.Printf("Container init process failed: %v\n", err)
-			os.Exit(1)
-		}
-		os.Exit(0)
-	}
-}
 
 type GoRunner struct{}
 
@@ -382,7 +370,7 @@ func (g *GoRunner) runWithNativeSandbox(limit *types.Limit, inputs []string, exp
 			ExpectedOutput: expectedOutputs[i],
 		}
 
-		sandboxResult, err := container_judge.ExecuteWithSandbox(workdir, limit.TimeLimit, limit.MemoryLimit, input)
+		sandboxResult, err := sandbox.ExecuteWithSandbox(workdir, limit.TimeLimit, limit.MemoryLimit, input)
 		if err != nil {
 			result.Status = types.StatusRuntimeError
 			result.ErrorMessage = fmt.Sprintf("Sandbox execution failed: %v", err)

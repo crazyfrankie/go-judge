@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/crazyfrankie/go-judge/pkg/runner/sandbox/cgroup"
@@ -247,13 +246,6 @@ func (s *Sandbox) monitorMemory(exceeded chan<- bool) {
 			}
 		}
 	}
-}
-
-// killProcessGroup kills the process group
-func (s *Sandbox) killProcessGroup(pid int) {
-	// Kill the entire process group
-	syscall.Kill(-pid, syscall.SIGKILL)
-	time.Sleep(10 * time.Millisecond)
 }
 
 // cleanup cleans up resources
