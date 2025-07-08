@@ -15,6 +15,7 @@ message JudgeRequest {
   repeated string output = 8;
   string max_mem = 9;  // MB
   string max_time = 10; // ms
+  string workdir = 11;
 }
 
 enum Language {

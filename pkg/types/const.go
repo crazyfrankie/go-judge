@@ -1,10 +1,6 @@
 package types
 
 const (
-	WorkDir = "/home/%s/judge"
-)
-
-const (
 	GoBuildShell = `
 #!/bin/sh
 set -e

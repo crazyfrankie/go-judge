@@ -143,6 +143,7 @@ type JudgeRequest struct {
 	Output         []string               `protobuf:"bytes,8,rep,name=output,proto3" json:"output,omitempty"`
 	MaxMem         string                 `protobuf:"bytes,9,opt,name=max_mem,json=maxMem,proto3" json:"max_mem,omitempty"`     // MB
 	MaxTime        string                 `protobuf:"bytes,10,opt,name=max_time,json=maxTime,proto3" json:"max_time,omitempty"` // ms
+	Workdir        string                 `protobuf:"bytes,11,opt,name=workdir,proto3" json:"workdir,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -243,6 +244,13 @@ func (x *JudgeRequest) GetMaxMem() string {
 func (x *JudgeRequest) GetMaxTime() string {
 	if x != nil {
 		return x.MaxTime
+	}
+	return ""
+}
+
+func (x *JudgeRequest) GetWorkdir() string {
+	if x != nil {
+		return x.Workdir
 	}
 	return ""
 }
@@ -586,7 +594,7 @@ var File_pkg_rpc_proto_judge_proto protoreflect.FileDescriptor
 
 const file_pkg_rpc_proto_judge_proto_rawDesc = "" +
 	"\n" +
-	"\x19pkg/rpc/proto/judge.proto\x12\x03rpc\"\xae\x02\n" +
+	"\x19pkg/rpc/proto/judge.proto\x12\x03rpc\"\xc8\x02\n" +
 	"\fJudgeRequest\x12)\n" +
 	"\blanguage\x18\x01 \x01(\x0e2\r.rpc.LanguageR\blanguage\x12\x1d\n" +
 	"\n" +
@@ -599,7 +607,8 @@ const file_pkg_rpc_proto_judge_proto_rawDesc = "" +
 	"\x06output\x18\b \x03(\tR\x06output\x12\x17\n" +
 	"\amax_mem\x18\t \x01(\tR\x06maxMem\x12\x19\n" +
 	"\bmax_time\x18\n" +
-	" \x01(\tR\amaxTime\"f\n" +
+	" \x01(\tR\amaxTime\x12\x18\n" +
+	"\aworkdir\x18\v \x01(\tR\aworkdir\"f\n" +
 	"\rJudgeResponse\x12#\n" +
 	"\x06result\x18\x01 \x01(\v2\v.rpc.ResultR\x06result\x120\n" +
 	"\aoverall\x18\x02 \x01(\v2\x16.rpc.OverallStatisticsR\aoverall\"\xf3\x03\n" +

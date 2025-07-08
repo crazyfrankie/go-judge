@@ -23,11 +23,8 @@ import (
 type GoRunner struct{}
 
 func (g *GoRunner) RunWithDocker(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeResponse, error) {
-	cmd := exec.Command("whoami")
-	user, _ := cmd.CombinedOutput()
-
 	// build work dir
-	workdir := fmt.Sprintf("%s/%d/%d", fmt.Sprintf(types.WorkDir, strings.TrimSpace(string(user))), req.GetProblemId(), req.GetUid())
+	workdir := fmt.Sprintf("%s/%d/%d", req.GetWorkdir(), req.GetProblemId(), req.GetUid())
 
 	if err := os.MkdirAll(workdir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create workdir: %v", err)
@@ -204,11 +201,8 @@ func (g *GoRunner) RunWithDocker(ctx context.Context, req *rpc.JudgeRequest) (*r
 }
 
 func (g *GoRunner) RunWithSandbox(ctx context.Context, req *rpc.JudgeRequest) (*rpc.JudgeResponse, error) {
-	cmd := exec.Command("whoami")
-	user, _ := cmd.CombinedOutput()
-
 	// build work dir
-	workdir := fmt.Sprintf("%s/%d/%d", fmt.Sprintf(types.WorkDir, strings.TrimSpace(string(user))), req.GetProblemId(), req.GetUid())
+	workdir := fmt.Sprintf("%s/%d/%d", req.GetWorkdir(), req.GetProblemId(), req.GetUid())
 
 	if err := os.MkdirAll(workdir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create workdir: %v", err)
