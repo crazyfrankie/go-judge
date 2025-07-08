@@ -1,8 +1,9 @@
-package sandbox
+package container_judge
 
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -10,7 +11,6 @@ import (
 	"time"
 
 	"github.com/crazyfrankie/go-judge/pkg/runner/sandbox/cgroup"
-	"github.com/crazyfrankie/go-judge/pkg/runner/sandbox/forkexec"
 	"github.com/crazyfrankie/go-judge/pkg/types"
 )
 
@@ -56,8 +56,130 @@ func ExecuteWithSandbox(workdir string, timeLimit, memoryLimit int, input string
 		Input:       input,
 	}
 
-	sandbox := NewSandbox(config)
+	// 使用简化沙箱 - 更可靠
+	sandbox := NewEnhancedSandbox(config)
 	return sandbox.Execute()
+}
+
+// NewParentProcess creates an isolated process based on Namespaces
+func NewParentProcess(config *SandboxConfig, nsConfig *NamespaceConfig) (*exec.Cmd, *os.File, error) {
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		return nil, nil, fmt.Errorf("create pipe error: %v", err)
+	}
+
+	// Use current process as init process
+	initCmd, err := os.Readlink("/proc/self/exe")
+	if err != nil {
+		return nil, nil, fmt.Errorf("get init process error: %v", err)
+	}
+
+	cmd := exec.Command(initCmd, "sandbox-init")
+
+	// Set namespace flags
+	cloneFlags := uintptr(0)
+	if nsConfig.UseUTS {
+		cloneFlags |= syscall.CLONE_NEWUTS
+	}
+	if nsConfig.UsePID {
+		cloneFlags |= syscall.CLONE_NEWPID
+	}
+	if nsConfig.UseMount {
+		cloneFlags |= syscall.CLONE_NEWNS
+	}
+	if nsConfig.UseNet {
+		cloneFlags |= syscall.CLONE_NEWNET
+	}
+	if nsConfig.UseIPC {
+		cloneFlags |= syscall.CLONE_NEWIPC
+	}
+	if nsConfig.UseUser {
+		cloneFlags |= syscall.CLONE_NEWUSER
+	}
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags: cloneFlags,
+		Setpgid:    true, // Set process group
+	}
+
+	// Don't set input/output here, let the child process handle it
+	// Pass configuration information to child process
+	cmd.ExtraFiles = []*os.File{readPipe}
+	cmd.Dir = config.WorkDir
+
+	// Set environment variables
+	cmd.Env = []string{
+		"PATH=/usr/local/go/bin:/usr/bin:/bin",
+		"HOME=" + config.WorkDir,
+		"TMPDIR=" + config.WorkDir,
+	}
+
+	return cmd, writePipe, nil
+}
+
+// ContainerInitProcess container initialization process
+func ContainerInitProcess() error {
+	// Read command
+	cmdArray := readUserCommand()
+	if cmdArray == nil || len(cmdArray) == 0 {
+		return fmt.Errorf("run container get user command error, cmdArray is nil")
+	}
+
+	// Set up mount points
+	if err := setUpMount(); err != nil {
+		return fmt.Errorf("setup mount error: %v", err)
+	}
+
+	// Execute user program
+	path, err := exec.LookPath(cmdArray[0])
+	if err != nil {
+		return fmt.Errorf("exec look path error: %v", err)
+	}
+
+	if err := syscall.Exec(path, cmdArray, os.Environ()); err != nil {
+		return fmt.Errorf("exec error: %v", err)
+	}
+
+	return nil
+}
+
+// readUserCommand reads user command
+func readUserCommand() []string {
+	pipe := os.NewFile(uintptr(3), "pipe")
+	if pipe == nil {
+		return nil
+	}
+	defer pipe.Close()
+
+	msg := make([]byte, 1024)
+	n, err := pipe.Read(msg)
+	if err != nil {
+		return nil
+	}
+
+	msgStr := string(msg[:n])
+	return strings.Split(strings.TrimSpace(msgStr), " ")
+}
+
+// setUpMount sets up mount points
+func setUpMount() error {
+	// Remount root filesystem as private
+	if err := syscall.Mount("", "/", "", syscall.MS_PRIVATE|syscall.MS_REC, ""); err != nil {
+		return fmt.Errorf("mount root as private error: %v", err)
+	}
+
+	// Mount proc
+	defaultMountFlags := syscall.MS_NOEXEC | syscall.MS_NOSUID | syscall.MS_NODEV
+	if err := syscall.Mount("proc", "/proc", "proc", uintptr(defaultMountFlags), ""); err != nil {
+		return fmt.Errorf("mount proc error: %v", err)
+	}
+
+	// Mount tmpfs to /dev
+	if err := syscall.Mount("tmpfs", "/dev", "tmpfs", syscall.MS_NOSUID|syscall.MS_STRICTATIME, "mode=755"); err != nil {
+		return fmt.Errorf("mount tmpfs error: %v", err)
+	}
+
+	return nil
 }
 
 // Sandbox based on Namespace and Cgroup
@@ -66,8 +188,8 @@ type Sandbox struct {
 	cgroupManager *cgroup.CgroupManager
 }
 
-// NewSandbox creates an enhanced sandbox
-func NewSandbox(config *SandboxConfig) *Sandbox {
+// NewEnhancedSandbox creates an enhanced sandbox
+func NewEnhancedSandbox(config *SandboxConfig) *Sandbox {
 	cgroupPath := fmt.Sprintf("sandbox-%d-%d", os.Getpid(), time.Now().UnixNano())
 
 	return &Sandbox{
@@ -76,7 +198,7 @@ func NewSandbox(config *SandboxConfig) *Sandbox {
 	}
 }
 
-// Execute executes a program in the enhanced sandbox using C-based fork+exec
+// Execute executes a program in the enhanced sandbox
 func (s *Sandbox) Execute() (*SandboxResult, error) {
 	result := &SandboxResult{}
 
@@ -85,26 +207,45 @@ func (s *Sandbox) Execute() (*SandboxResult, error) {
 		return nil, fmt.Errorf("failed to prepare environment: %v", err)
 	}
 
-	// Create forkexec configuration
-	forkConfig := &forkexec.ForkExecConfig{
-		Executable:    s.config.Executable,
-		WorkDir:       s.config.WorkDir,
-		Input:         s.config.Input,
-		EnableNetwork: s.config.EnableNetwork,
+	// Set namespace configuration
+	nsConfig := &NamespaceConfig{
+		UseUTS:   true,                    // Isolate hostname
+		UsePID:   true,                    // Isolate process ID
+		UseMount: true,                    // Isolate mount points
+		UseNet:   !s.config.EnableNetwork, // Decide whether to isolate network based on config
+		UseIPC:   true,                    // Isolate IPC
+		UseUser:  false,                   // Don't use user namespace for now to avoid permission issues
 	}
+
+	// Create isolated process
+	cmd, writePipe, err := NewParentProcess(s.config, nsConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create parent process: %v", err)
+	}
+	defer writePipe.Close()
+
+	// Set input/output redirection to parent process
+	if s.config.Input != "" {
+		cmd.Stdin = strings.NewReader(s.config.Input)
+	}
+
+	var outputBuffer strings.Builder
+	var errorBuffer strings.Builder
+	cmd.Stdout = &outputBuffer
+	cmd.Stderr = &errorBuffer
 
 	// Record start time
 	startTime := time.Now()
 
-	// Use C-based fork+exec to avoid Go runtime stack issues
-	pid, err := forkexec.ForkExec(forkConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fork and exec process: %v", err)
+	// Start process
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start process: %v", err)
 	}
 
+	pid := cmd.Process.Pid
 	fmt.Printf("Started sandbox process with PID: %d\n", pid)
 
-	// Set cgroup resource limits
+	// Set cgroup resource limits - use dynamically calculated resource config
 	resource := calculateResourceConfig(s.config.TimeLimit, s.config.MemoryLimit)
 
 	if err := s.cgroupManager.Set(resource); err != nil {
@@ -116,38 +257,41 @@ func (s *Sandbox) Execute() (*SandboxResult, error) {
 		fmt.Printf("Warning: failed to apply cgroup to process: %v\n", err)
 	}
 
-	// Set up timeout and memory monitoring
+	// Send execution command to child process
+	command := s.config.Executable
+	if _, err := writePipe.Write([]byte(command)); err != nil {
+		return nil, fmt.Errorf("failed to write command to pipe: %v", err)
+	}
+	writePipe.Close()
+
+	// Wait for execution to complete or timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
 	timeout := time.Duration(s.config.TimeLimit) * time.Millisecond
+	var waitErr error
 	var killedReason string
 
 	// Start memory monitoring
 	memoryMonitor := make(chan bool, 1)
 	go s.monitorMemory(memoryMonitor)
 
-	// Wait for process completion or timeout/memory limit
-	done := make(chan error, 1)
-	go func() {
-		exitCode, err := forkexec.WaitForProcess(pid, timeout)
-		if err != nil {
-			done <- err
-		} else {
-			result.ExitCode = exitCode
-			done <- nil
-		}
-	}()
-
 	select {
-	case <-done:
-		// Normal completion or process error
+	case waitErr = <-done:
+		// Normal completion
 	case <-time.After(timeout):
 		// Timeout
-		forkexec.KillProcess(pid)
+		s.killProcessGroup(pid)
 		result.Status = types.StatusTimeLimitExceeded
+		waitErr = fmt.Errorf("execution timeout")
 		killedReason = "timeout"
 	case <-memoryMonitor:
 		// Memory limit exceeded
-		forkexec.KillProcess(pid)
+		s.killProcessGroup(pid)
 		result.Status = types.StatusMemoryLimitExceeded
+		waitErr = fmt.Errorf("memory limit exceeded")
 		killedReason = "memory"
 	}
 
@@ -161,8 +305,23 @@ func (s *Sandbox) Execute() (*SandboxResult, error) {
 		fmt.Printf("Memory usage from cgroup: %d bytes (%.2f MB)\n", memUsage, float64(memUsage)/1024/1024)
 	}
 
-	// Read output from files if they exist (since C process handles I/O directly)
-	s.readProcessOutput(result)
+	// Get exit code
+	if waitErr != nil {
+		if exitError, ok := waitErr.(*exec.ExitError); ok {
+			result.ExitCode = exitError.ExitCode()
+		} else {
+			result.ExitCode = -1
+		}
+	} else {
+		result.ExitCode = 0
+	}
+
+	// Get program output
+	result.Output = strings.TrimSpace(outputBuffer.String())
+	result.ErrorOutput = strings.TrimSpace(errorBuffer.String())
+
+	fmt.Printf("Program output: '%s'\n", result.Output)
+	fmt.Printf("Program stderr: '%s'\n", result.ErrorOutput)
 
 	// Determine final status
 	if result.Status == 0 { // If status hasn't been set yet
@@ -181,31 +340,6 @@ func (s *Sandbox) Execute() (*SandboxResult, error) {
 	s.cleanup()
 
 	return result, nil
-}
-
-// readProcessOutput reads output from the process execution
-func (s *Sandbox) readProcessOutput(result *SandboxResult) {
-	// Since the C process handles I/O directly, we need to read from stdout/stderr files
-	// or implement a different mechanism to capture output
-
-	// For now, we'll try to read from standard output files if they exist
-	stdoutFile := filepath.Join(s.config.WorkDir, "stdout.txt")
-	stderrFile := filepath.Join(s.config.WorkDir, "stderr.txt")
-
-	// Read stdout
-	if data, err := os.ReadFile(stdoutFile); err == nil {
-		result.Output = strings.TrimSpace(string(data))
-		os.Remove(stdoutFile) // Clean up
-	}
-
-	// Read stderr
-	if data, err := os.ReadFile(stderrFile); err == nil {
-		result.ErrorOutput = strings.TrimSpace(string(data))
-		os.Remove(stderrFile) // Clean up
-	}
-
-	fmt.Printf("Program output: '%s'\n", result.Output)
-	fmt.Printf("Program stderr: '%s'\n", result.ErrorOutput)
 }
 
 // prepareEnvironment prepares the execution environment

@@ -1,0 +1,287 @@
+package forkexec
+
+/*
+#define _GNU_SOURCE
+#include <unistd.h>
+#include <errno.h>
+#include <sched.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <sys/mount.h>
+#include <sys/syscall.h>
+#include <signal.h>
+#include <sys/prctl.h>
+
+#define SANDBOX_INIT_ENV "SANDBOX_INIT"
+
+// clone flags for sandbox creation
+#define CLONE_FLAGS_FULL (CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWIPC)
+#define CLONE_FLAGS_NO_NET (CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC)
+
+// Global variables to store sandbox configuration
+static char *g_executable_path = NULL;
+static char *g_work_dir = NULL;
+static char *g_input_data = NULL;
+static int g_enable_network = 0;
+
+// Function to set sandbox configuration from Go
+void set_sandbox_config(const char *executable, const char *workdir, const char *input, int enable_net) {
+    if (g_executable_path) free(g_executable_path);
+    if (g_work_dir) free(g_work_dir);
+    if (g_input_data) free(g_input_data);
+    
+    g_executable_path = strdup(executable);
+    g_work_dir = strdup(workdir);
+    g_input_data = input ? strdup(input) : NULL;
+    g_enable_network = enable_net;
+}
+
+// Setup basic mount points for sandbox
+int setup_sandbox_mounts() {
+    // Remount root filesystem as private
+    if (mount("", "/", "", MS_PRIVATE | MS_REC, "") != 0) {
+        fprintf(stderr, "sandbox: failed to mount root as private: %s\n", strerror(errno));
+        return -1;
+    }
+
+    // Mount proc
+    if (mount("proc", "/proc", "proc", MS_NOEXEC | MS_NOSUID | MS_NODEV, "") != 0) {
+        fprintf(stderr, "sandbox: failed to mount proc: %s\n", strerror(errno));
+        return -1;
+    }
+
+    // Mount tmpfs to /tmp
+    if (mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=755,size=10m") != 0) {
+        fprintf(stderr, "sandbox: failed to mount /tmp: %s\n", strerror(errno));
+        return -1;
+    }
+
+    return 0;
+}
+
+// Container init process - this runs in the child after clone
+void container_init() {
+    // Change to working directory
+    if (g_work_dir && chdir(g_work_dir) != 0) {
+        fprintf(stderr, "sandbox: failed to change directory to %s: %s\n", g_work_dir, strerror(errno));
+        exit(1);
+    }
+
+    // Setup mount points
+    if (setup_sandbox_mounts() != 0) {
+        fprintf(stderr, "sandbox: failed to setup mounts\n");
+        exit(1);
+    }
+
+    // Setup stdin if input data is provided
+    if (g_input_data) {
+        int pipefd[2];
+        if (pipe(pipefd) == -1) {
+            fprintf(stderr, "sandbox: failed to create input pipe: %s\n", strerror(errno));
+            exit(1);
+        }
+
+        if (write(pipefd[1], g_input_data, strlen(g_input_data)) == -1) {
+            fprintf(stderr, "sandbox: failed to write input data: %s\n", strerror(errno));
+            exit(1);
+        }
+        close(pipefd[1]);
+
+        if (dup2(pipefd[0], STDIN_FILENO) == -1) {
+            fprintf(stderr, "sandbox: failed to redirect stdin: %s\n", strerror(errno));
+            exit(1);
+        }
+        close(pipefd[0]);
+    }
+
+    // Redirect stdout and stderr to files in working directory
+    char stdout_path[1024];
+    char stderr_path[1024];
+    snprintf(stdout_path, sizeof(stdout_path), "%s/stdout.txt", g_work_dir ? g_work_dir : "/tmp");
+    snprintf(stderr_path, sizeof(stderr_path), "%s/stderr.txt", g_work_dir ? g_work_dir : "/tmp");
+
+    // Open stdout file
+    int stdout_fd = open(stdout_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (stdout_fd == -1) {
+        fprintf(stderr, "sandbox: failed to open stdout file: %s\n", strerror(errno));
+        exit(1);
+    }
+
+    // Open stderr file
+    int stderr_fd = open(stderr_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (stderr_fd == -1) {
+        fprintf(stderr, "sandbox: failed to open stderr file: %s\n", strerror(errno));
+        close(stdout_fd);
+        exit(1);
+    }
+
+    // Redirect stdout and stderr
+    if (dup2(stdout_fd, STDOUT_FILENO) == -1) {
+        fprintf(stderr, "sandbox: failed to redirect stdout: %s\n", strerror(errno));
+        exit(1);
+    }
+
+    if (dup2(stderr_fd, STDERR_FILENO) == -1) {
+        fprintf(stderr, "sandbox: failed to redirect stderr: %s\n", strerror(errno));
+        exit(1);
+    }
+
+    close(stdout_fd);
+    close(stderr_fd);
+
+    // Set process name
+    if (prctl(PR_SET_NAME, "sandbox-init", 0, 0, 0) != 0) {
+        fprintf(stderr, "sandbox: failed to set process name: %s\n", strerror(errno));
+    }
+
+    // Execute the target program
+    if (g_executable_path) {
+        char *args[] = {g_executable_path, NULL};
+        char *env[] = {
+            "PATH=/usr/local/go/bin:/usr/bin:/bin",
+            "HOME=/tmp",
+            "TMPDIR=/tmp",
+            NULL
+        };
+        
+        execve(g_executable_path, args, env);
+        fprintf(stderr, "sandbox: execve failed: %s\n", strerror(errno));
+    }
+    
+    exit(1);
+}
+
+// Fork and exec in C to avoid Go runtime issues
+int sandbox_clone_exec(const char *executable, const char *workdir, const char *input, int enable_network) {
+    // Set configuration
+    set_sandbox_config(executable, workdir, input, enable_network);
+
+    // Choose clone flags based on network requirement
+    unsigned long clone_flags = enable_network ? CLONE_FLAGS_NO_NET : CLONE_FLAGS_FULL;
+
+    // Fork with namespaces using clone syscall
+    pid_t child_pid = syscall(SYS_clone, clone_flags | SIGCHLD, NULL, NULL, NULL, NULL);
+
+    if (child_pid == -1) {
+        fprintf(stderr, "sandbox: clone failed: %s\n", strerror(errno));
+        return -1;
+    }
+
+    if (child_pid == 0) {
+        // Child process - run container init
+        container_init();
+        // Should never reach here
+        exit(1);
+    }
+
+    // Parent process - return child PID
+    return child_pid;
+}
+
+// The constructor runs before Go runtime starts
+__attribute__((constructor)) void sandbox_init(void) {
+    char *sandbox_init;
+    sandbox_init = getenv(SANDBOX_INIT_ENV);
+
+    if (sandbox_init && strcmp(sandbox_init, "1") == 0) {
+        // This is the sandbox init process - let Go runtime continue
+        return;
+    }
+}
+*/
+import "C"
+
+import (
+	"fmt"
+	"syscall"
+	"time"
+	"unsafe"
+)
+
+// ForkExecConfig contains configuration for fork+exec operation
+type ForkExecConfig struct {
+	Executable    string
+	WorkDir       string
+	Input         string
+	EnableNetwork bool
+}
+
+// ForkExec creates a new process using C's clone+exec to avoid Go runtime stack issues
+func ForkExec(config *ForkExecConfig) (int, error) {
+	// Convert Go strings to C strings
+	cExecutable := C.CString(config.Executable)
+	defer C.free(unsafe.Pointer(cExecutable))
+
+	cWorkDir := C.CString(config.WorkDir)
+	defer C.free(unsafe.Pointer(cWorkDir))
+
+	var cInput *C.char
+	if config.Input != "" {
+		cInput = C.CString(config.Input)
+		defer C.free(unsafe.Pointer(cInput))
+	}
+
+	enableNetwork := 0
+	if config.EnableNetwork {
+		enableNetwork = 1
+	}
+
+	// Call C function to perform clone+exec
+	pid := int(C.sandbox_clone_exec(cExecutable, cWorkDir, cInput, C.int(enableNetwork)))
+	
+	if pid == -1 {
+		return 0, fmt.Errorf("failed to clone and exec process")
+	}
+
+	return pid, nil
+}
+
+// WaitForProcess waits for the process to complete and returns exit status
+func WaitForProcess(pid int, timeout time.Duration) (int, error) {
+	// Create a channel to signal completion
+	done := make(chan error, 1)
+	var waitStatus syscall.WaitStatus
+
+	go func() {
+		_, err := syscall.Wait4(pid, &waitStatus, 0, nil)
+		done <- err
+	}()
+
+	// Wait for completion or timeout
+	select {
+	case err := <-done:
+		if err != nil {
+			return -1, fmt.Errorf("wait4 failed: %v", err)
+		}
+		
+		// Check if process exited normally
+		if waitStatus.Exited() {
+			return waitStatus.ExitStatus(), nil
+		} else if waitStatus.Signaled() {
+			return -1, fmt.Errorf("process killed by signal %d", waitStatus.Signal())
+		}
+		
+		return -1, fmt.Errorf("process ended with unknown status")
+		
+	case <-time.After(timeout):
+		// Kill the process group on timeout
+		syscall.Kill(-pid, syscall.SIGKILL)
+		return -1, fmt.Errorf("process timeout")
+	}
+}
+
+// KillProcess kills a process and its children
+func KillProcess(pid int) error {
+	// Kill the entire process group
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+		return fmt.Errorf("failed to kill process group %d: %v", pid, err)
+	}
+	
+	// Give it a moment to die
+	time.Sleep(10 * time.Millisecond)
+	
+	return nil
+}
