@@ -30,11 +30,6 @@ clean:
 	rm -rf bin/
 	rm -f work/result.txt work/error.txt work/stats.txt work/exitcode.txt
 
-# 清理系统资源（修复文件描述符泄漏）
-clean-system:
-	chmod +x ./cleanup.sh
-	./cleanup.sh
-
 # 生成 protobuf 文件
 proto:
 	protoc --go_out=. --go_opt=paths=source_relative \

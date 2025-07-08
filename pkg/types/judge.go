@@ -33,6 +33,30 @@ type TestCaseResult struct {
 	ExecutionResult *ExecutionResult `json:"execution_result"` // 详细执行信息
 }
 
+// ContainerJudgeResult 容器内主控评测的结果
+type ContainerJudgeResult struct {
+	Status          string                `json:"status"`
+	TotalTestCases  int                   `json:"total_test_cases"`
+	PassedTestCases int                   `json:"passed_test_cases"`
+	TotalTime       int64                 `json:"total_time"`
+	TotalMemory     int64                 `json:"total_memory"`
+	MaxMemory       int64                 `json:"max_memory"`
+	AvgMemory       int64                 `json:"avg_memory"`
+	TestResults     []ContainerTestResult `json:"test_results"`
+	ErrorMessage    string                `json:"error_message,omitempty"`
+}
+
+// ContainerTestResult 容器内单个测试用例结果
+type ContainerTestResult struct {
+	TestId         string `json:"test_id"`
+	Status         string `json:"status"`
+	TimeUsed       int64  `json:"time_used"`
+	MemoryUsed     int64  `json:"memory_used"`
+	Output         string `json:"output,omitempty"`
+	ExpectedOutput string `json:"expected_output,omitempty"`
+	ErrorMessage   string `json:"error_message,omitempty"`
+}
+
 type Status int
 
 const (

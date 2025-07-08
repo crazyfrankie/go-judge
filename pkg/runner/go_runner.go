@@ -6,7 +6,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"math"
 	"os"
 	"os/exec"
 	"strconv"
@@ -15,8 +14,23 @@ import (
 	"time"
 
 	"github.com/crazyfrankie/go-judge/pkg/rpc"
+	"github.com/crazyfrankie/go-judge/pkg/runner/docker"
+	"github.com/crazyfrankie/go-judge/pkg/runner/sandbox"
 	"github.com/crazyfrankie/go-judge/pkg/types"
+	"github.com/crazyfrankie/go-judge/pkg/utils"
 )
+
+// init handles the sandbox-init command
+func init() {
+	// Check if this is a sandbox initialization process
+	if len(os.Args) > 1 && os.Args[1] == "sandbox-init" {
+		if err := sandbox.ContainerInitProcess(); err != nil {
+			fmt.Printf("Container init process failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+}
 
 type GoRunner struct{}
 
@@ -50,13 +64,18 @@ func (g *GoRunner) RunWithDocker(ctx context.Context, req *rpc.JudgeRequest) (*r
 		return nil, fmt.Errorf("template parse error: %v", err)
 	}
 
-	// precompile
-	compileRes, err := preCompile(workdir)
-	if err != nil || (compileRes != nil && compileRes.Status == types.StatusCompilationError) {
-		// 编译错误，直接返回
+	start := time.Now()
+	judgeResult, err := docker.RunWithContainerControlled(ctx, limit, req.GetInput(), req.GetOutput(), workdir)
+	if err != nil {
+		return nil, fmt.Errorf("container-controlled execution failed: %v", err)
+	}
+	totalExecutionTime := time.Since(start)
+	fmt.Printf("Container-controlled execution completed in %v for %d test cases\n", totalExecutionTime, len(req.GetInput()))
+
+	if judgeResult.Status == "compilation_error" {
 		result := &rpc.Result{
 			Status:       rpc.Status_status_compilation_error,
-			ErrorMessage: compileRes.ErrorMessage,
+			ErrorMessage: judgeResult.ErrorMessage,
 			StatusMsg:    "Compilation Error",
 		}
 
@@ -71,116 +90,118 @@ func (g *GoRunner) RunWithDocker(ctx context.Context, req *rpc.JudgeRequest) (*r
 		}, nil
 	}
 
-	// create watch shell
-	err = buildShellForWatch(workdir)
-	if err != nil {
-		return nil, err
-	}
-
-	containerID, err := startLongRunningContainer(ctx, workdir, limit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to start container: %v", err)
-	}
-	defer func() {
-		stopContainer(containerID)
-	}()
-
-	var bestTimeResult *rpc.Result
-	var bestMemoryResult *rpc.Result
-	var totalTime int64
-	var totalMemory int64
-	var maxMemory int64
-
-	for i, input := range req.GetInput() {
-		expectedOutput := ""
-		if i < len(req.GetOutput()) {
-			expectedOutput = req.GetOutput()[i]
+	// Find the first failed test case (if any)
+	var firstFailedResult *types.ContainerTestResult
+	for i := range judgeResult.TestResults {
+		if judgeResult.TestResults[i].Status != "accepted" {
+			firstFailedResult = &judgeResult.TestResults[i]
+			break
 		}
+	}
 
-		testResult, err := g.judgeOneTest(limit, input, expectedOutput, workdir)
-		if err != nil {
-			testResult = &types.TestCaseResult{
-				Status:       types.StatusRuntimeError,
-				ErrorMessage: fmt.Sprintf("Test execution error: %v", err),
+	// Construct the best result (shortest time)
+	var bestResult *rpc.Result
+	if len(judgeResult.TestResults) > 0 {
+		bestTestResult := judgeResult.TestResults[0]
+		for _, testResult := range judgeResult.TestResults {
+			if testResult.Status == "accepted" && testResult.TimeUsed < bestTestResult.TimeUsed {
+				bestTestResult = testResult
 			}
 		}
 
-		result := &rpc.Result{
-			TimeUsed:          testResult.TimeUsed,
-			MemoryUsed:        testResult.MemoryUsed,
-			StatusRuntime:     formatRuntime(testResult.TimeUsed),
-			StatusMemory:      formatMemory(testResult.MemoryUsed),
-			StatusMsg:         getStatusMessage(testResult.Status),
-			RuntimePercentile: calculatePercentile(testResult.TimeUsed, false),
-			MemoryPercentile:  calculatePercentile(testResult.MemoryUsed, true),
-			TestcaseInput:     input,
+		bestResult = &rpc.Result{
+			TimeUsed:          bestTestResult.TimeUsed,
+			MemoryUsed:        bestTestResult.MemoryUsed,
+			StatusRuntime:     utils.FormatRuntime(bestTestResult.TimeUsed),
+			StatusMemory:      utils.FormatMemory(bestTestResult.MemoryUsed),
+			RuntimePercentile: utils.CalculatePercentile(bestTestResult.TimeUsed, false),
+			MemoryPercentile:  utils.CalculatePercentile(bestTestResult.MemoryUsed, true),
 		}
 
-		// 只有在出错时才返回输出和错误信息
-		if testResult.Status != types.StatusAccepted {
-			result.Output = testResult.Output
-			result.ExpectedOutput = testResult.ExpectedOutput
-			result.ErrorMessage = testResult.ErrorMessage
+		// If there are failed test cases, use the results of the first failure
+		if firstFailedResult != nil {
+			bestResult.TimeUsed = firstFailedResult.TimeUsed
+			bestResult.MemoryUsed = firstFailedResult.MemoryUsed
+			bestResult.Output = firstFailedResult.Output
+			bestResult.ExpectedOutput = firstFailedResult.ExpectedOutput
+			bestResult.ErrorMessage = firstFailedResult.ErrorMessage
+			bestResult.StatusRuntime = utils.FormatRuntime(firstFailedResult.TimeUsed)
+			bestResult.StatusMemory = utils.FormatMemory(firstFailedResult.MemoryUsed)
+			bestResult.RuntimePercentile = utils.CalculatePercentile(firstFailedResult.TimeUsed, false)
+			bestResult.MemoryPercentile = utils.CalculatePercentile(firstFailedResult.MemoryUsed, true)
 		}
 
-		switch testResult.Status {
-		case types.StatusAccepted:
-			result.Status = rpc.Status_status_accepted
-		case types.StatusWrongAnswer:
-			result.Status = rpc.Status_status_wrong_answer
-		case types.StatusTimeLimitExceeded:
-			result.Status = rpc.Status_status_time_limit_exceeded
-		case types.StatusMemoryLimitExceeded:
-			result.Status = rpc.Status_status_memory_limit_exceeded
-		case types.StatusRuntimeError:
-			result.Status = rpc.Status_status_runtime_error
-		case types.StatusCompilationError:
-			result.Status = rpc.Status_status_compilation_error
+		switch judgeResult.Status {
+		case "accepted":
+			bestResult.Status = rpc.Status_status_accepted
+			bestResult.StatusMsg = "Accepted"
+		case "wrong_answer":
+			bestResult.Status = rpc.Status_status_wrong_answer
+			bestResult.StatusMsg = "Wrong Answer"
+		case "time_limit_exceeded":
+			bestResult.Status = rpc.Status_status_time_limit_exceeded
+			bestResult.StatusMsg = "Time Limit Exceeded"
+		case "memory_limit_exceeded":
+			bestResult.Status = rpc.Status_status_memory_limit_exceeded
+			bestResult.StatusMsg = "Memory Limit Exceeded"
+		case "runtime_error":
+			bestResult.Status = rpc.Status_status_runtime_error
+			bestResult.StatusMsg = "Runtime Error"
 		default:
-			result.Status = rpc.Status_status_runtime_error
+			bestResult.Status = rpc.Status_status_runtime_error
+			bestResult.StatusMsg = "Unknown Error"
 		}
 
-		if result.Status != rpc.Status_status_accepted {
-			result.FailedTestcaseIndex = int32(i)
-			return &rpc.JudgeResponse{
-				Result: result,
-				Overall: &rpc.OverallStatistics{
-					TotalTestcases: uint32(len(req.GetInput())),
-					TotalCorrect:   uint32(i),
-					CompareResult:  strings.Repeat("1", i) + "X",
-					FinalStatus:    result.Status,
-					TaskFinishTime: uint64(time.Now().UnixMilli()),
-					Finished:       true,
-				},
-			}, nil
-		}
-
-		totalTime += testResult.TimeUsed
-		totalMemory += testResult.MemoryUsed
-		if testResult.MemoryUsed > maxMemory {
-			maxMemory = testResult.MemoryUsed
-		}
-
-		if bestTimeResult == nil || testResult.TimeUsed < bestTimeResult.TimeUsed {
-			bestTimeResult = result
-		}
-		if bestMemoryResult == nil || testResult.MemoryUsed < bestMemoryResult.MemoryUsed {
-			bestMemoryResult = result
+		// Setting up test case inputs (inputs for the first test case as an example)
+		if len(req.GetInput()) > 0 {
+			bestResult.TestcaseInput = req.GetInput()[0]
 		}
 	}
 
-	bestResult := bestTimeResult
-	if bestMemoryResult != nil && bestMemoryResult.MemoryUsed < bestResult.MemoryUsed {
-		bestResult = bestMemoryResult
+	// If there is a failure, set the index of the failed test case and return it immediately
+	if judgeResult.Status != "accepted" && firstFailedResult != nil {
+		// Find the index of failed test cases
+		failedIndex := 0
+		for i, testResult := range judgeResult.TestResults {
+			if testResult.Status != "accepted" {
+				failedIndex = i
+				break
+			}
+		}
+
+		bestResult.FailedTestcaseIndex = int32(failedIndex)
+
+		// Constructing the comparison result string
+		compareResult := ""
+		for i := 0; i < len(judgeResult.TestResults); i++ {
+			if i < failedIndex {
+				compareResult += "1"
+			} else if i == failedIndex {
+				compareResult += "X"
+				break
+			}
+		}
+
+		return &rpc.JudgeResponse{
+			Result: bestResult,
+			Overall: &rpc.OverallStatistics{
+				TotalTestcases: uint32(judgeResult.TotalTestCases),
+				TotalCorrect:   uint32(judgeResult.PassedTestCases),
+				CompareResult:  compareResult,
+				FinalStatus:    bestResult.Status,
+				TaskFinishTime: uint64(time.Now().UnixMilli()),
+				Finished:       true,
+			},
+		}, nil
 	}
 
 	overall := &rpc.OverallStatistics{
-		TotalTestcases:           uint32(len(req.GetInput())),
-		TotalCorrect:             uint32(len(req.GetInput())),
-		CompareResult:            strings.Repeat("1", len(req.GetInput())),
-		TotalTime:                totalTime,
-		MaxMemory:                maxMemory,
-		AvgMemory:                totalMemory / int64(len(req.GetInput())),
+		TotalTestcases:           uint32(judgeResult.TotalTestCases),
+		TotalCorrect:             uint32(judgeResult.PassedTestCases),
+		CompareResult:            strings.Repeat("1", judgeResult.TotalTestCases),
+		TotalTime:                judgeResult.TotalTime,
+		MaxMemory:                judgeResult.MaxMemory,
+		AvgMemory:                judgeResult.AvgMemory,
 		FinalStatus:              rpc.Status_status_accepted,
 		TaskFinishTime:           uint64(time.Now().UnixMilli()),
 		Finished:                 true,
@@ -244,7 +265,6 @@ func (g *GoRunner) RunWithSandbox(ctx context.Context, req *rpc.JudgeRequest) (*
 		}, nil
 	}
 
-	// 使用沙箱执行测试用例
 	start := time.Now()
 	testResults, err := g.runWithNativeSandbox(limit, req.GetInput(), req.GetOutput(), workdir)
 	if err != nil {
@@ -253,7 +273,6 @@ func (g *GoRunner) RunWithSandbox(ctx context.Context, req *rpc.JudgeRequest) (*
 	totalExecutionTime := time.Since(start)
 	fmt.Printf("Sandbox execution completed in %v for %d test cases\n", totalExecutionTime, len(req.GetInput()))
 
-	// 处理结果
 	var bestTimeResult *rpc.Result
 	var bestMemoryResult *rpc.Result
 	var totalTime int64
@@ -269,15 +288,14 @@ func (g *GoRunner) RunWithSandbox(ctx context.Context, req *rpc.JudgeRequest) (*
 		result := &rpc.Result{
 			TimeUsed:          testResult.TimeUsed,
 			MemoryUsed:        testResult.MemoryUsed,
-			StatusRuntime:     formatRuntime(testResult.TimeUsed),
-			StatusMemory:      formatMemory(testResult.MemoryUsed),
-			StatusMsg:         getStatusMessage(testResult.Status),
-			RuntimePercentile: calculatePercentile(testResult.TimeUsed, false),
-			MemoryPercentile:  calculatePercentile(testResult.MemoryUsed, true),
+			StatusRuntime:     utils.FormatRuntime(testResult.TimeUsed),
+			StatusMemory:      utils.FormatMemory(testResult.MemoryUsed),
+			StatusMsg:         utils.GetStatusMessage(testResult.Status),
+			RuntimePercentile: utils.CalculatePercentile(testResult.TimeUsed, false),
+			MemoryPercentile:  utils.CalculatePercentile(testResult.MemoryUsed, true),
 			TestcaseInput:     input,
 		}
 
-		// 只有在出错时才返回输出和错误信息
 		if testResult.Status != types.StatusAccepted {
 			result.Output = testResult.Output
 			result.ExpectedOutput = testResult.ExpectedOutput
@@ -364,13 +382,11 @@ func (g *GoRunner) runWithNativeSandbox(limit *types.Limit, inputs []string, exp
 			ExpectedOutput: expectedOutputs[i],
 		}
 
-		// 使用沙箱执行单个测试用例
-		sandboxResult, err := ExecuteWithSandbox(workdir, limit.TimeLimit, limit.MemoryLimit, input)
+		sandboxResult, err := sandbox.ExecuteWithSandbox(workdir, limit.TimeLimit, limit.MemoryLimit, input)
 		if err != nil {
 			result.Status = types.StatusRuntimeError
 			result.ErrorMessage = fmt.Sprintf("Sandbox execution failed: %v", err)
 		} else {
-			// 复制沙箱结果到测试结果
 			result.TimeUsed = sandboxResult.TimeUsed
 			result.MemoryUsed = sandboxResult.MemoryUsed
 			result.Output = sandboxResult.Output
@@ -382,16 +398,14 @@ func (g *GoRunner) runWithNativeSandbox(limit *types.Limit, inputs []string, exp
 				ErrorOutput: sandboxResult.ErrorOutput,
 			}
 
-			// 判断状态
 			if sandboxResult.Status == types.StatusAccepted {
-				// 比较输出
 				compareConfig := &types.CompareConfig{
 					IgnoreWhitespace: true,
 					IgnoreCase:       false,
 					Precision:        -1,
 				}
 
-				if compareOutput(result.Output, result.ExpectedOutput, compareConfig) {
+				if utils.CompareOutput(result.Output, result.ExpectedOutput, compareConfig) {
 					result.Status = types.StatusAccepted
 				} else {
 					result.Status = types.StatusWrongAnswer
@@ -399,7 +413,7 @@ func (g *GoRunner) runWithNativeSandbox(limit *types.Limit, inputs []string, exp
 				}
 			} else {
 				result.Status = sandboxResult.Status
-				result.ErrorMessage = getStatusMessage(sandboxResult.Status)
+				result.ErrorMessage = utils.GetStatusMessage(sandboxResult.Status)
 			}
 		}
 
@@ -407,69 +421,6 @@ func (g *GoRunner) runWithNativeSandbox(limit *types.Limit, inputs []string, exp
 	}
 
 	return results, nil
-}
-
-func (g *GoRunner) judgeOneTest(limit *types.Limit, input string, expectedOutput string, workdir string) (*types.TestCaseResult, error) {
-	result := &types.TestCaseResult{
-		ExpectedOutput: expectedOutput,
-	}
-
-	err := buildShellRunExec(workdir, input)
-	if err != nil {
-		result.Status = types.StatusRuntimeError
-		result.ErrorMessage = fmt.Sprintf("Failed to create shell script: %v", err)
-		return result, nil
-	}
-
-	execResult, err := waitForContainerExecution(workdir, 30*time.Second)
-	if err != nil {
-		result.Status = types.StatusRuntimeError
-		result.ErrorMessage = fmt.Sprintf("Container execution failed: %v", err)
-		return result, nil
-	}
-
-	result.ExecutionResult = execResult
-	result.TimeUsed = execResult.TimeUsed
-	result.MemoryUsed = execResult.MemoryUsed
-	result.Output = execResult.Output
-
-	if execResult.ExitCode != 0 {
-		if execResult.ErrorOutput != "" {
-			result.Status = types.StatusRuntimeError
-			result.ErrorMessage = execResult.ErrorOutput
-		} else {
-			result.Status = types.StatusRuntimeError
-			result.ErrorMessage = "Program exited with non-zero code"
-		}
-		return result, nil
-	}
-
-	if limit != nil && execResult.TimeUsed > int64(limit.TimeLimit) {
-		result.Status = types.StatusTimeLimitExceeded
-		result.ErrorMessage = fmt.Sprintf("Time limit exceeded: %dms > %dms", execResult.TimeUsed, limit.TimeLimit)
-		return result, nil
-	}
-
-	if limit != nil && execResult.MemoryUsed > int64(limit.MemoryLimit*1024*1024) {
-		result.Status = types.StatusMemoryLimitExceeded
-		result.ErrorMessage = fmt.Sprintf("Memory limit exceeded: %d bytes > %d bytes", execResult.MemoryUsed, limit.MemoryLimit*1024*1024)
-		return result, nil
-	}
-
-	compareConfig := &types.CompareConfig{
-		IgnoreWhitespace: true,
-		IgnoreCase:       false,
-		Precision:        -1,
-	}
-
-	if compareOutput(result.Output, expectedOutput, compareConfig) {
-		result.Status = types.StatusAccepted
-	} else {
-		result.Status = types.StatusWrongAnswer
-		result.ErrorMessage = "Output mismatch"
-	}
-
-	return result, nil
 }
 
 func parseTemplate(fullTemp string, userCode string, types string, workdir string) error {
@@ -529,7 +480,10 @@ func detectImports(code string) []string {
 		"strings": `"strings"`,
 		"strconv": `"strconv"`,
 		"heap":    `"container/heap"`,
+		"list":    `"container/list"`,
+		"ring":    `"container/ring"`,
 		"json":    `"encoding/json"`,
+		"path":    `"path"`,
 	}
 	var imports []string
 	for name := range set {
@@ -564,381 +518,4 @@ func preCompile(workdir string) (*types.PreCompileResult, error) {
 	}
 
 	return nil, nil
-}
-
-func buildShellForWatch(workdir string) error {
-	var sh = `#!/bin/sh
-while inotifywait -e create,modify /app; do
-    [ -f ./run.sh ] && ./run.sh && rm -f ./run.sh
-done`
-
-	runFile := fmt.Sprintf("%s/entrypoint.sh", workdir)
-	err := os.WriteFile(runFile, []byte(sh), 0755)
-	if err != nil {
-		return fmt.Errorf("failed to write run.sh: %v", err)
-	}
-
-	cmd := exec.Command("chmod", "+x", runFile)
-	err = cmd.Run()
-
-	return err
-}
-
-func startLongRunningContainer(ctx context.Context, workdir string, limit *types.Limit) (string, error) {
-	args := buildDockerArgs(limit)
-	defaultArgs := []string{
-		"run", "-d",
-		"-v", fmt.Sprintf("%s:/app", workdir),
-		"--name", fmt.Sprintf("judge-container-%d", time.Now().UnixNano()),
-	}
-
-	args = append(defaultArgs, args...)
-	args = append(args, types.GoImage)
-
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to start container: %v", err)
-	}
-
-	containerID := strings.TrimSpace(string(output))
-	fmt.Printf("Started judge container: %s\n", containerID)
-
-	return containerID, nil
-}
-
-func buildShellRunExec(workdir string, input string) error {
-	runFile := fmt.Sprintf("%s/run.sh", workdir)
-	err := os.WriteFile(runFile, []byte(fmt.Sprintf(types.GoRunShell, input)), 0755)
-	if err != nil {
-		return fmt.Errorf("failed to write run.sh: %v", err)
-	}
-
-	return nil
-}
-
-// waitForContainerExecution Waiting for container execution to complete (by listening for file system changes)
-func waitForContainerExecution(workdir string, timeout time.Duration) (*types.ExecutionResult, error) {
-	runFile := fmt.Sprintf("%s/run.sh", workdir)
-	resultFile := fmt.Sprintf("%s/result.txt", workdir)
-
-	start := time.Now()
-
-	// 优化1: 使用自适应轮询间隔
-	pollInterval := 5 * time.Millisecond // 从5ms开始
-	maxInterval := 50 * time.Millisecond // 最大50ms
-
-	// Wait for the run.sh file to be deleted by the container (indicating completion of execution)
-	for time.Since(start) < timeout {
-		// Check if run.sh still exists.
-		if _, err := os.Stat(runFile); os.IsNotExist(err) {
-			// run.sh has been deleted, check if the result file was generated
-			if _, err := os.Stat(resultFile); err == nil {
-				// Result file exists, parse results
-				return parseStatsFile(workdir)
-			}
-		}
-
-		time.Sleep(pollInterval)
-
-		// 自适应增加轮询间隔，避免过度占用CPU
-		if pollInterval < maxInterval {
-			pollInterval = time.Duration(float64(pollInterval) * 1.5)
-			if pollInterval > maxInterval {
-				pollInterval = maxInterval
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("container execution timeout after %v", timeout)
-}
-
-// buildDockerArgs Building Docker startup parameters
-func buildDockerArgs(limit *types.Limit) []string {
-	args := make([]string, 0, 8)
-
-	// 内存限制 - 用户程序限制 + Go编译器和运行时开销
-	// Go编译器和运行时需要额外的128MB内存
-	memLimit := limit.MemoryLimit + 128
-	memStr := fmt.Sprintf("%dm", memLimit)
-	args = append(args, "--memory="+memStr)
-
-	// 限制进程数量 - Go编译器需要很多子进程，所以给一个合理的限制
-	args = append(args, "--pids-limit=200")
-
-	// CPU时间限制（秒） - 用户程序时间 + 编译时间
-	// 给Go编译过程额外20秒时间
-	cpuSeconds := int(math.Ceil(float64(limit.TimeLimit)/1000)) + 20
-	args = append(args, "--ulimit", fmt.Sprintf("cpu=%d:%d", cpuSeconds, cpuSeconds))
-
-	// 文件描述符限制 - 编译需要打开很多文件
-	args = append(args, "--ulimit", "nofile=2048:2048")
-
-	// 临时文件系统，允许执行和写入
-	args = append(args, "--tmpfs", "/tmp:exec,size=300m")
-
-	// 网络隔离
-	args = append(args, "--network=none")
-
-	// 安全选项
-	args = append(args, "--security-opt=no-new-privileges")
-	args = append(args, "--cap-drop=ALL")
-
-	return args
-}
-
-func compareOutput(actual, expected string, config *types.CompareConfig) bool {
-	if config == nil {
-		config = &types.CompareConfig{
-			IgnoreWhitespace: true,
-			IgnoreCase:       false,
-			Precision:        -1,
-		}
-	}
-
-	actualProcessed := actual
-	expectedProcessed := expected
-	if config.IgnoreCase {
-		actualProcessed = strings.ToLower(actualProcessed)
-		expectedProcessed = strings.ToLower(expectedProcessed)
-	}
-	if config.IgnoreWhitespace {
-		actualProcessed = strings.Join(strings.Fields(actualProcessed), " ")
-		expectedProcessed = strings.Join(strings.Fields(expectedProcessed), " ")
-	}
-	if config.Precision >= 0 {
-		return compareFloatOutput(actualProcessed, expectedProcessed, config.Precision)
-	}
-
-	return actualProcessed == expectedProcessed
-}
-
-func compareFloatOutput(actual, expected string, precision int) bool {
-	actualNums := extractNumbers(actual)
-	expectedNums := extractNumbers(expected)
-
-	if len(actualNums) != len(expectedNums) {
-		return false
-	}
-
-	tolerance := math.Pow(10, -float64(precision))
-
-	for i, actualNum := range actualNums {
-		expectedNum := expectedNums[i]
-		if math.Abs(actualNum-expectedNum) > tolerance {
-			return false
-		}
-	}
-
-	return true
-}
-
-func extractNumbers(s string) []float64 {
-	var numbers []float64
-	words := strings.Fields(s)
-
-	for _, word := range words {
-		if num, err := strconv.ParseFloat(word, 64); err == nil {
-			numbers = append(numbers, num)
-		}
-	}
-
-	return numbers
-}
-
-func parseStatsFile(workdir string) (*types.ExecutionResult, error) {
-	result := &types.ExecutionResult{}
-
-	statsPath := fmt.Sprintf("%s/stats.txt", workdir)
-	content, err := os.ReadFile(statsPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read stats file: %v", err)
-	}
-
-	lines := strings.Split(string(content), "\n")
-	stats := make(map[string]string)
-
-	for _, line := range lines {
-		if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
-			key := strings.TrimSpace(parts[0])
-			val := strings.TrimSpace(parts[1])
-			stats[key] = val
-		}
-	}
-
-	if elapsedTime, exists := stats["Elapsed (wall clock) time (h:mm:ss or m:ss)"]; exists {
-		if seconds := parseElapsedTime(elapsedTime); seconds > 0 {
-			result.TimeUsed = int64(seconds * 1000)
-		}
-	} else if userTime, exists := stats["User time (seconds)"]; exists {
-		if seconds, err := strconv.ParseFloat(userTime, 64); err == nil {
-			result.TimeUsed = int64(seconds * 1000)
-		}
-	}
-
-	if maxMem, exists := stats["Maximum resident set size (kbytes)"]; exists {
-		if kb, err := strconv.ParseInt(maxMem, 10, 64); err == nil {
-			result.MemoryUsed = kb * 1024 // 转换为字节
-		}
-	}
-
-	exitCodePath := fmt.Sprintf("%s/exitcode.txt", workdir)
-	if exitCodeData, err := os.ReadFile(exitCodePath); err == nil {
-		if exitCode, err := strconv.Atoi(strings.TrimSpace(string(exitCodeData))); err == nil {
-			result.ExitCode = exitCode
-		}
-	}
-
-	resultPath := fmt.Sprintf("%s/result.txt", workdir)
-	if resultData, err := os.ReadFile(resultPath); err == nil {
-		result.Output = strings.TrimSpace(string(resultData))
-	}
-
-	errorPath := fmt.Sprintf("%s/error.txt", workdir)
-	if errorData, err := os.ReadFile(errorPath); err == nil {
-		result.ErrorOutput = strings.TrimSpace(string(errorData))
-	}
-
-	return result, nil
-}
-
-func formatRuntime(timeMs int64) string {
-	if timeMs < 1000 {
-		return fmt.Sprintf("%d ms", timeMs)
-	}
-	return fmt.Sprintf("%.2f s", float64(timeMs)/1000.0)
-}
-
-func formatMemory(bytes int64) string {
-	const (
-		KB = 1024
-		MB = KB * 1024
-		GB = MB * 1024
-	)
-
-	if bytes < KB {
-		return fmt.Sprintf("%d B", bytes)
-	} else if bytes < MB {
-		return fmt.Sprintf("%.1f KB", float64(bytes)/KB)
-	} else if bytes < GB {
-		return fmt.Sprintf("%.1f MB", float64(bytes)/MB)
-	}
-	return fmt.Sprintf("%.2f GB", float64(bytes)/GB)
-}
-
-func getStatusMessage(status types.Status) string {
-	switch status {
-	case types.StatusAccepted:
-		return "Accepted"
-	case types.StatusWrongAnswer:
-		return "Wrong Answer"
-	case types.StatusTimeLimitExceeded:
-		return "Time Limit Exceeded"
-	case types.StatusMemoryLimitExceeded:
-		return "Memory Limit Exceeded"
-	case types.StatusRuntimeError:
-		return "Runtime Error"
-	case types.StatusCompilationError:
-		return "Compilation Error"
-	default:
-		return "Unknown"
-	}
-}
-
-func calculatePercentile(value int64, isMemory bool) uint32 {
-	// 简化的百分位计算，实际应该基于历史数据
-	// 可以后续接入数据库来计算真实的百分位
-	if isMemory {
-		// 基于内存使用的简单百分位估算
-		if value < 1024*1024 { // < 1MB
-			return 95
-		} else if value < 10*1024*1024 { // < 10MB
-			return 80
-		} else if value < 50*1024*1024 { // < 50MB
-			return 50
-		}
-		return 20
-	} else {
-		// 基于执行时间的简单百分位估算
-		if value < 100 { // < 100ms
-			return 95
-		} else if value < 500 { // < 500ms
-			return 80
-		} else if value < 1000 { // < 1s
-			return 50
-		}
-		return 20
-	}
-}
-
-// parseElapsedTime Parse elapsed time as "0m 2.57s" or "1:23:45".
-func parseElapsedTime(timeStr string) float64 {
-	timeStr = strings.TrimSpace(timeStr)
-
-	if strings.Contains(timeStr, "m") && strings.Contains(timeStr, "s") {
-		parts := strings.Fields(timeStr)
-		var totalSeconds float64
-
-		for _, part := range parts {
-			if strings.HasSuffix(part, "m") {
-				if minutes, err := strconv.ParseFloat(strings.TrimSuffix(part, "m"), 64); err == nil {
-					totalSeconds += minutes * 60
-				}
-			} else if strings.HasSuffix(part, "s") {
-				if seconds, err := strconv.ParseFloat(strings.TrimSuffix(part, "s"), 64); err == nil {
-					totalSeconds += seconds
-				}
-			}
-		}
-		return totalSeconds
-	}
-
-	// Processing the "1:23:45" format
-	if strings.Contains(timeStr, ":") {
-		parts := strings.Split(timeStr, ":")
-		var totalSeconds float64
-
-		switch len(parts) {
-		case 2: // mm:ss
-			if minutes, err := strconv.ParseFloat(parts[0], 64); err == nil {
-				totalSeconds += minutes * 60
-			}
-			if seconds, err := strconv.ParseFloat(parts[1], 64); err == nil {
-				totalSeconds += seconds
-			}
-		case 3: // hh:mm:ss
-			if hours, err := strconv.ParseFloat(parts[0], 64); err == nil {
-				totalSeconds += hours * 3600
-			}
-			if minutes, err := strconv.ParseFloat(parts[1], 64); err == nil {
-				totalSeconds += minutes * 60
-			}
-			if seconds, err := strconv.ParseFloat(parts[2], 64); err == nil {
-				totalSeconds += seconds
-			}
-		}
-		return totalSeconds
-	}
-
-	// Direct parse seconds
-	if seconds, err := strconv.ParseFloat(timeStr, 64); err == nil {
-		return seconds
-	}
-
-	return 0
-}
-
-// stopContainer stop and clean container
-func stopContainer(containerID string) {
-	if containerID == "" {
-		return
-	}
-
-	cmd := exec.Command("docker", "stop", containerID)
-	cmd.Run()
-
-	cmd = exec.Command("docker", "rm", containerID)
-	cmd.Run()
-
-	fmt.Printf("Stopped and removed container: %s\n", containerID)
 }
