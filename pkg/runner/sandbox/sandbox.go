@@ -84,36 +84,36 @@ func (s *Sandbox) Execute() (*SandboxResult, error) {
 		return nil, fmt.Errorf("failed to prepare environment: %v", err)
 	}
 
+	// Set cgroup resource limits BEFORE fork+exec
+	resource := calculateResourceConfig(s.config.TimeLimit, s.config.MemoryLimit)
+	if err := s.cgroupManager.Set(resource); err != nil {
+		fmt.Printf("Warning: failed to set cgroup limits: %v\n", err)
+	}
+
+	// Get cgroup path for passing to fork+exec
+	cgroupPath := s.cgroupManager.GetAbsolutePath()
+
 	// Create forkexec configuration
 	forkConfig := &forkexec.ForkExecConfig{
 		Executable:    s.config.Executable,
 		WorkDir:       s.config.WorkDir,
 		Input:         s.config.Input,
 		EnableNetwork: s.config.EnableNetwork,
+		CgroupPath:    cgroupPath, // Pass cgroup path to fork+exec
 	}
 
 	// Record start time
 	startTime := time.Now()
 
 	// Use C-based fork+exec to avoid Go runtime stack issues
+	// The process will be created directly in the cgroup if clone3 is supported
+	// Otherwise, the child process will add itself to the cgroup before exec
 	pid, err := forkexec.ForkExec(forkConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fork and exec process: %v", err)
 	}
 
 	fmt.Printf("Started sandbox process with PID: %d\n", pid)
-
-	// Set cgroup resource limits
-	resource := calculateResourceConfig(s.config.TimeLimit, s.config.MemoryLimit)
-
-	if err := s.cgroupManager.Set(resource); err != nil {
-		fmt.Printf("Warning: failed to set cgroup limits: %v\n", err)
-	}
-
-	// Add process to cgroup
-	if err := s.cgroupManager.Apply(pid); err != nil {
-		fmt.Printf("Warning: failed to apply cgroup to process: %v\n", err)
-	}
 
 	// Set up timeout and memory monitoring
 	timeout := time.Duration(s.config.TimeLimit) * time.Millisecond
@@ -154,8 +154,9 @@ func (s *Sandbox) Execute() (*SandboxResult, error) {
 	elapsed := time.Since(startTime)
 	result.TimeUsed = elapsed.Nanoseconds() / 1000000
 
-	// Get final memory usage
-	if memUsage, err := s.cgroupManager.GetMemoryUsage(); err == nil {
+	// Get final memory usage based on exit status
+	isMemoryExceeded := killedReason == "memory" || result.Status == types.StatusMemoryLimitExceeded
+	if memUsage, err := s.cgroupManager.GetMemoryUsage(isMemoryExceeded); err == nil {
 		result.MemoryUsed = memUsage
 		fmt.Printf("Memory usage from cgroup: %d bytes (%.2f MB)\n", memUsage, float64(memUsage)/1024/1024)
 	}
@@ -225,17 +226,38 @@ func (s *Sandbox) prepareEnvironment() error {
 	return nil
 }
 
-// monitorMemory monitors memory usage
+// monitorMemory monitors memory usage using both polling and events
 func (s *Sandbox) monitorMemory(exceeded chan<- bool) {
-	ticker := time.NewTicker(10 * time.Millisecond)
+	// Start a goroutine to check memory.events for OOM events
+	go func() {
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if oomOccurred, err := s.cgroupManager.CheckMemoryEvents(); err == nil && oomOccurred {
+					select {
+					case exceeded <- true:
+					default:
+					}
+					return
+				}
+			}
+		}
+	}()
+
+	// Also use traditional polling as a backup mechanism
+	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 
-	memoryLimit := int64(s.config.MemoryLimit) * 1024 * 1024 // Convert to bytes
+	memoryLimit := int64(s.config.MemoryLimit * 1024 * 1024) // Convert to bytes
 
 	for {
 		select {
 		case <-ticker.C:
-			if usage, err := s.cgroupManager.GetMemoryUsage(); err == nil {
+			// Use false here since we're just checking, not reporting a memory exceeded condition yet
+			if usage, err := s.cgroupManager.GetMemoryUsage(false); err == nil {
 				if usage > memoryLimit {
 					select {
 					case exceeded <- true:
@@ -258,8 +280,9 @@ func (s *Sandbox) cleanup() {
 
 // calculateResourceConfig calculates resource configuration based on time and memory limits
 func calculateResourceConfig(timeLimit int, memoryLimit int) *cgroup.ResourceConfig {
-	// Memory limit: directly convert MB to bytes
-	memoryBytes := int64(memoryLimit) * 1024 * 1024
+	// Memory limit: convert MB to bytes with a 5% buffer for system overhead
+	bufferFactor := 1.5 // 5% buffer
+	memoryBytes := int64(float64(memoryLimit*1024*1024) * bufferFactor)
 
 	// CPU quota calculation:
 	// timeLimit is in milliseconds, we need to set a reasonable CPU quota
@@ -304,8 +327,10 @@ func calculateResourceConfig(timeLimit int, memoryLimit int) *cgroup.ResourceCon
 		cpuShare = "512" // Low priority
 	}
 
+	memory := strconv.FormatInt(memoryBytes, 10)
+	fmt.Println(memory)
 	return &cgroup.ResourceConfig{
-		MemoryLimit: strconv.FormatInt(memoryBytes, 10),
+		MemoryLimit: memory,
 		CpuQuota:    cpuQuota,
 		CpuPeriod:   cpuPeriod,
 		CpuShare:    cpuShare,

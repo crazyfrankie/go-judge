@@ -5,3 +5,4 @@ work
 runner.go
 
 test/
+/pkg/runner/sandbox/forkexec/explain.md

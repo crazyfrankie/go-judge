@@ -35,16 +35,6 @@ func NewCgroupManager(path string) *CgroupManager {
 	}
 }
 
-// Apply adds a process to the cgroup
-func (c *CgroupManager) Apply(pid int) error {
-	if err := c.createCgroupIfNotExists(); err != nil {
-		return err
-	}
-	// Write process ID to cgroup.procs
-	cgroupProcsPath := filepath.Join(c.getAbsolutePath(), "cgroup.procs")
-	return os.WriteFile(cgroupProcsPath, []byte(strconv.Itoa(pid)), 0700)
-}
-
 // Set sets resource limits
 func (c *CgroupManager) Set(res *ResourceConfig) error {
 	c.Resource = res
@@ -179,11 +169,26 @@ func (c *CgroupManager) getAbsolutePath() string {
 	return filepath.Join(CgroupRoot, c.Path)
 }
 
-// GetMemoryUsage gets memory usage
-func (c *CgroupManager) GetMemoryUsage() (int64, error) {
+// GetAbsolutePath returns the absolute path of the cgroup
+func (c *CgroupManager) GetAbsolutePath() string {
+	return c.getAbsolutePath()
+}
+
+// GetMemoryUsage gets memory usage based on whether memory limit was exceeded
+func (c *CgroupManager) GetMemoryUsage(memoryExceeded bool) (int64, error) {
 	cgroupPath := c.getAbsolutePath()
 
-	// Try to read memory.current (cgroup v2)
+	if memoryExceeded {
+		// If memory was exceeded, prioritize peak memory usage
+		peakPath := filepath.Join(cgroupPath, "memory.peak")
+		if content, err := os.ReadFile(peakPath); err == nil {
+			if usage, err := strconv.ParseInt(strings.TrimSpace(string(content)), 10, 64); err == nil {
+				return usage, nil
+			}
+		}
+	}
+
+	// Otherwise, prioritize current memory usage
 	currentPath := filepath.Join(cgroupPath, "memory.current")
 	if content, err := os.ReadFile(currentPath); err == nil {
 		if usage, err := strconv.ParseInt(strings.TrimSpace(string(content)), 10, 64); err == nil {
@@ -191,7 +196,7 @@ func (c *CgroupManager) GetMemoryUsage() (int64, error) {
 		}
 	}
 
-	// Try to read memory.peak (cgroup v2 peak)
+	// If current memory reading fails, try peak as fallback
 	peakPath := filepath.Join(cgroupPath, "memory.peak")
 	if content, err := os.ReadFile(peakPath); err == nil {
 		if usage, err := strconv.ParseInt(strings.TrimSpace(string(content)), 10, 64); err == nil {
@@ -200,4 +205,36 @@ func (c *CgroupManager) GetMemoryUsage() (int64, error) {
 	}
 
 	return 0, fmt.Errorf("failed to read memory usage")
+}
+
+// CheckMemoryEvents checks if OOM event occurred in cgroup
+func (c *CgroupManager) CheckMemoryEvents() (bool, error) {
+	cgroupPath := c.getAbsolutePath()
+	eventsPath := filepath.Join(cgroupPath, "memory.events")
+
+	content, err := os.ReadFile(eventsPath)
+	if err != nil {
+		return false, err
+	}
+
+	// Parse memory events
+	events := make(map[string]int)
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		parts := strings.Fields(line)
+		if len(parts) == 2 {
+			val, _ := strconv.Atoi(parts[1])
+			events[parts[0]] = val
+		}
+	}
+
+	// Check for OOM events
+	if val, ok := events["oom"]; ok && val > 0 {
+		return true, nil
+	}
+	if val, ok := events["max"]; ok && val > 0 {
+		return true, nil
+	}
+
+	return false, nil
 }

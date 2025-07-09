@@ -14,6 +14,16 @@ package forkexec
 #include <sys/syscall.h>
 #include <signal.h>
 #include <sys/prctl.h>
+#include <linux/sched.h>
+
+// For clone3 support
+#include <linux/types.h>
+
+#ifndef __NR_clone3
+#define __NR_clone3 435
+#endif
+
+// We don't need to define struct clone_args as it's already defined in linux/sched.h
 
 #define SANDBOX_INIT_ENV "SANDBOX_INIT"
 
@@ -26,17 +36,20 @@ static char *g_executable_path = NULL;
 static char *g_work_dir = NULL;
 static char *g_input_data = NULL;
 static int g_enable_network = 0;
+static char *g_cgroup_path = NULL;
 
 // Function to set sandbox configuration from Go
-void set_sandbox_config(const char *executable, const char *workdir, const char *input, int enable_net) {
+void set_sandbox_config(const char *executable, const char *workdir, const char *input, int enable_net, const char *cgroup_path) {
     if (g_executable_path) free(g_executable_path);
     if (g_work_dir) free(g_work_dir);
     if (g_input_data) free(g_input_data);
+    if (g_cgroup_path) free(g_cgroup_path);
     
     g_executable_path = strdup(executable);
     g_work_dir = strdup(workdir);
     g_input_data = input ? strdup(input) : NULL;
     g_enable_network = enable_net;
+    g_cgroup_path = cgroup_path ? strdup(cgroup_path) : NULL;
 }
 
 // Setup basic mount points for sandbox
@@ -64,6 +77,30 @@ int setup_sandbox_mounts() {
 
 // Container init process - this runs in the child after clone
 void container_init() {
+    // First thing: add ourselves to the cgroup if we have a path
+    // This ensures cgroup limits are applied before any significant work is done
+    if (g_cgroup_path) {
+        char cgroup_procs_path[1024];
+        snprintf(cgroup_procs_path, sizeof(cgroup_procs_path), "%s/cgroup.procs", g_cgroup_path);
+        
+        // Open cgroup.procs file
+        int cgroup_fd = open(cgroup_procs_path, O_WRONLY);
+        if (cgroup_fd >= 0) {
+            // Get current PID
+            pid_t current_pid = getpid();
+            char pid_str[32];
+            snprintf(pid_str, sizeof(pid_str), "%d", current_pid);
+            
+            // Write PID to cgroup.procs
+            if (write(cgroup_fd, pid_str, strlen(pid_str)) < 0) {
+                fprintf(stderr, "sandbox: failed to write PID to cgroup: %s\n", strerror(errno));
+            }
+            close(cgroup_fd);
+        } else {
+            fprintf(stderr, "sandbox: failed to open cgroup.procs: %s\n", strerror(errno));
+        }
+    }
+
     // Change to working directory
     if (g_work_dir && chdir(g_work_dir) != 0) {
         fprintf(stderr, "sandbox: failed to change directory to %s: %s\n", g_work_dir, strerror(errno));
@@ -155,15 +192,58 @@ void container_init() {
 }
 
 // Fork and exec in C to avoid Go runtime issues
-int sandbox_clone_exec(const char *executable, const char *workdir, const char *input, int enable_network) {
+int sandbox_clone_exec(const char *executable, const char *workdir, const char *input, int enable_network, const char *cgroup_path) {
     // Set configuration
-    set_sandbox_config(executable, workdir, input, enable_network);
+    set_sandbox_config(executable, workdir, input, enable_network, cgroup_path);
 
     // Choose clone flags based on network requirement
     unsigned long clone_flags = enable_network ? CLONE_FLAGS_NO_NET : CLONE_FLAGS_FULL;
-
-    // Fork with namespaces using clone syscall
-    pid_t child_pid = syscall(SYS_clone, clone_flags | SIGCHLD, NULL, NULL, NULL, NULL);
+    
+    pid_t child_pid;
+    
+    // Try to use clone3 if available (Linux 5.3+)
+    if (cgroup_path != NULL) {
+        struct clone_args args = {0};
+        args.flags = clone_flags;
+        args.exit_signal = SIGCHLD;
+        
+        // Open cgroup.procs file to get a file descriptor
+        int cgroup_fd = -1;
+        char cgroup_procs_path[1024];
+        snprintf(cgroup_procs_path, sizeof(cgroup_procs_path), "%s/cgroup.procs", cgroup_path);
+        
+        cgroup_fd = open(cgroup_procs_path, O_WRONLY);
+        if (cgroup_fd >= 0) {
+            args.cgroup = (__aligned_u64)cgroup_fd;
+            
+            // Try clone3 syscall
+            child_pid = syscall(__NR_clone3, &args, sizeof(args));
+            
+            // Close cgroup fd regardless of clone3 success
+            close(cgroup_fd);
+            
+            if (child_pid >= 0) {
+                // clone3 succeeded
+                if (child_pid == 0) {
+                    // Child process - run container init
+                    container_init();
+                    // Should never reach here
+                    exit(1);
+                }
+                
+                // Parent process - return child PID
+                return child_pid;
+            }
+            
+            // If clone3 failed (e.g., on older kernels), fall back to regular clone
+            fprintf(stderr, "sandbox: clone3 failed (kernel may not support it): %s\n", strerror(errno));
+        } else {
+            fprintf(stderr, "sandbox: failed to open cgroup.procs: %s\n", strerror(errno));
+        }
+    }
+    
+    // Fallback to traditional clone if clone3 is not available or failed
+    child_pid = syscall(SYS_clone, clone_flags | SIGCHLD, NULL, NULL, NULL, NULL);
 
     if (child_pid == -1) {
         fprintf(stderr, "sandbox: clone failed: %s\n", strerror(errno));
@@ -171,7 +251,7 @@ int sandbox_clone_exec(const char *executable, const char *workdir, const char *
     }
 
     if (child_pid == 0) {
-        // Child process - run container init
+        // Child process - run container init which will add itself to cgroup
         container_init();
         // Should never reach here
         exit(1);
@@ -207,6 +287,7 @@ type ForkExecConfig struct {
 	WorkDir       string
 	Input         string
 	EnableNetwork bool
+	CgroupPath    string // Added cgroup path
 }
 
 // ForkExec creates a new process using C's clone+exec to avoid Go runtime stack issues
@@ -228,9 +309,15 @@ func ForkExec(config *ForkExecConfig) (int, error) {
 	if config.EnableNetwork {
 		enableNetwork = 1
 	}
+	
+	var cCgroupPath *C.char
+	if config.CgroupPath != "" {
+		cCgroupPath = C.CString(config.CgroupPath)
+		defer C.free(unsafe.Pointer(cCgroupPath))
+	}
 
 	// Call C function to perform clone+exec
-	pid := int(C.sandbox_clone_exec(cExecutable, cWorkDir, cInput, C.int(enableNetwork)))
+	pid := int(C.sandbox_clone_exec(cExecutable, cWorkDir, cInput, C.int(enableNetwork), cCgroupPath))
 	
 	if pid == -1 {
 		return 0, fmt.Errorf("failed to clone and exec process")
