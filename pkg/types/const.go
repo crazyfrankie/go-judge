@@ -26,6 +26,21 @@ if ! go build main.go > compile.txt 2>&1; then
 fi
 `
 
+	CBuildShell = `#!/bin/sh
+set -e
+cd %s
+
+# [1/2] 清理之前的结果文件
+rm -f result.txt error.txt stats.txt exitcode.txt compile.txt
+
+# [2/2] 编译新的文件
+if ! gcc main.c -o main > compile.txt 2>&1; then
+    echo "1" > exitcode.txt
+    cat compile.txt > error.txt
+    echo "Compilation error" >> error.txt
+    exit 1
+fi`
+
 	GoRunShell = `
 #!/bin/sh
 set -e

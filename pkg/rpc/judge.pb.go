@@ -28,6 +28,7 @@ const (
 	Language_java   Language = 1
 	Language_cpp    Language = 2
 	Language_python Language = 3
+	Language_c      Language = 4
 )
 
 // Enum value maps for Language.
@@ -37,12 +38,14 @@ var (
 		1: "java",
 		2: "cpp",
 		3: "python",
+		4: "c",
 	}
 	Language_value = map[string]int32{
 		"go":     0,
 		"java":   1,
 		"cpp":    2,
 		"python": 3,
+		"c":      4,
 	}
 )
 
@@ -645,13 +648,14 @@ const file_pkg_rpc_proto_judge_proto_rawDesc = "" +
 	"\bfinished\x18\n" +
 	" \x01(\bR\bfinished\x12<\n" +
 	"\x1aoverall_runtime_percentile\x18\v \x01(\rR\x18overallRuntimePercentile\x12:\n" +
-	"\x19overall_memory_percentile\x18\f \x01(\rR\x17overallMemoryPercentile*1\n" +
+	"\x19overall_memory_percentile\x18\f \x01(\rR\x17overallMemoryPercentile*8\n" +
 	"\bLanguage\x12\x06\n" +
 	"\x02go\x10\x00\x12\b\n" +
 	"\x04java\x10\x01\x12\a\n" +
 	"\x03cpp\x10\x02\x12\n" +
 	"\n" +
-	"\x06python\x10\x03*\xb0\x01\n" +
+	"\x06python\x10\x03\x12\x05\n" +
+	"\x01c\x10\x04*\xb0\x01\n" +
 	"\x06Status\x12\x13\n" +
 	"\x0fstatus_accepted\x10\x00\x12\x17\n" +
 	"\x13status_wrong_answer\x10\x01\x12\x1e\n" +

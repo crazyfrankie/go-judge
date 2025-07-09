@@ -44,7 +44,7 @@ func (g *GoRunner) RunWithDocker(ctx context.Context, req *rpc.JudgeRequest) (*r
 	}
 
 	// parse code template
-	err := parseTemplate(req.GetFullTemplate(), req.GetCode(), req.GetTypeDefinition(), workdir)
+	err := g.parseGoTemplate(req.GetFullTemplate(), req.GetCode(), req.GetTypeDefinition(), workdir)
 	if err != nil {
 		return nil, fmt.Errorf("template parse error: %v", err)
 	}
@@ -222,13 +222,13 @@ func (g *GoRunner) RunWithSandbox(ctx context.Context, req *rpc.JudgeRequest) (*
 	}
 
 	// parse code template
-	err := parseTemplate(req.GetFullTemplate(), req.GetCode(), req.GetTypeDefinition(), workdir)
+	err := g.parseGoTemplate(req.GetFullTemplate(), req.GetCode(), req.GetTypeDefinition(), workdir)
 	if err != nil {
 		return nil, fmt.Errorf("template parse error: %v", err)
 	}
 
 	// precompile
-	compileRes, err := preCompile(workdir)
+	compileRes, err := g.preCompile(workdir)
 	if err != nil || (compileRes != nil && compileRes.Status == types.StatusCompilationError) {
 		result := &rpc.Result{
 			Status:       rpc.Status_status_compilation_error,
@@ -405,7 +405,33 @@ func (g *GoRunner) runWithNativeSandbox(limit *types.Limit, inputs []string, exp
 	return results, nil
 }
 
-func parseTemplate(fullTemp string, userCode string, types string, workdir string) error {
+func (g *GoRunner) preCompile(workdir string) (*types.PreCompileResult, error) {
+	result := &types.PreCompileResult{}
+
+	shFile := fmt.Sprintf("%s/%s", workdir, "build.sh")
+	sh, err := os.OpenFile(shFile, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, err
+	}
+	defer sh.Close()
+	if _, err = sh.WriteString(fmt.Sprintf(types.GoBuildShell, workdir)); err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("chmod", "+x", sh.Name())
+	cmd.Run()
+
+	cmd = exec.Command("sh", shFile)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		result.Status = types.StatusCompilationError
+		result.ErrorMessage = string(out)
+		return result, nil
+	}
+
+	return nil, nil
+}
+
+func (g *GoRunner) parseGoTemplate(fullTemp string, userCode string, types string, workdir string) error {
 	tpl, _ := template.New("main").Parse(fullTemp)
 
 	tmp, _ := os.CreateTemp(os.TempDir(), "main_*.go")
@@ -421,7 +447,7 @@ func parseTemplate(fullTemp string, userCode string, types string, workdir strin
 	}
 
 	content, _ := os.ReadFile(tmp.Name())
-	imports := detectImports(string(content))
+	imports := g.detectImports(string(content))
 
 	var final string
 	if len(imports) != 0 {
@@ -443,7 +469,7 @@ func parseTemplate(fullTemp string, userCode string, types string, workdir strin
 	return nil
 }
 
-func detectImports(code string) []string {
+func (g *GoRunner) detectImports(code string) []string {
 	set := make(map[string]bool)
 	fset := token.NewFileSet()
 	f, _ := parser.ParseFile(fset, "", code, parser.AllErrors)
@@ -474,30 +500,4 @@ func detectImports(code string) []string {
 		}
 	}
 	return imports
-}
-
-func preCompile(workdir string) (*types.PreCompileResult, error) {
-	result := &types.PreCompileResult{}
-
-	shFile := fmt.Sprintf("%s/%s", workdir, "build.sh")
-	sh, err := os.OpenFile(shFile, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return nil, err
-	}
-	defer sh.Close()
-	if _, err = sh.WriteString(fmt.Sprintf(types.GoBuildShell, workdir)); err != nil {
-		return nil, err
-	}
-	cmd := exec.Command("chmod", "+x", sh.Name())
-	cmd.Run()
-
-	cmd = exec.Command("sh", shFile)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		result.Status = types.StatusCompilationError
-		result.ErrorMessage = string(out)
-		return result, nil
-	}
-
-	return nil, nil
 }

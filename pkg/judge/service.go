@@ -13,6 +13,7 @@ import (
 type JudgeService struct {
 	rpc.UnimplementedJudgeServiceServer
 	goRunner *runner.GoRunner
+	cRunner  *runner.CRunner
 }
 
 func NewJudgeService() *JudgeService {
@@ -28,6 +29,8 @@ func (j *JudgeService) Judge(ctx context.Context, req *rpc.JudgeRequest) (*rpc.J
 	switch req.GetLanguage() {
 	case rpc.Language_go:
 		response, err = j.goRunner.RunWithSandbox(ctx, req)
+	case rpc.Language_c:
+		response, err = j.cRunner.RunWithSandbox(ctx, req)
 	case rpc.Language_java:
 		// TODO: 实现 Java runner
 		return nil, fmt.Errorf("Java runner not implemented yet")

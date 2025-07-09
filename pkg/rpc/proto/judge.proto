@@ -23,6 +23,7 @@ enum Language {
   java = 1;
   cpp = 2;
   python = 3;
+  c = 4;
 }
 
 // 简化的判题响应，类似LeetCode风格
