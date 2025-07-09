@@ -12,13 +12,16 @@ import (
 
 type JudgeService struct {
 	rpc.UnimplementedJudgeServiceServer
-	goRunner *runner.GoRunner
-	cRunner  *runner.CRunner
+	goRunner  *runner.GoRunner
+	cRunner   *runner.CRunner
+	cppRunner *runner.CppRunner
 }
 
 func NewJudgeService() *JudgeService {
 	return &JudgeService{
-		goRunner: &runner.GoRunner{},
+		goRunner:  &runner.GoRunner{},
+		cppRunner: &runner.CppRunner{},
+		cRunner:   &runner.CRunner{},
 	}
 }
 
@@ -36,7 +39,7 @@ func (j *JudgeService) Judge(ctx context.Context, req *rpc.JudgeRequest) (*rpc.J
 		return nil, fmt.Errorf("Java runner not implemented yet")
 	case rpc.Language_cpp:
 		// TODO: 实现 C++ runner
-		return nil, fmt.Errorf("C++ runner not implemented yet")
+		response, err = j.cppRunner.RunWithSandbox(ctx, req)
 	case rpc.Language_python:
 		// TODO: 实现 Python runner
 		return nil, fmt.Errorf("Python runner not implemented yet")
